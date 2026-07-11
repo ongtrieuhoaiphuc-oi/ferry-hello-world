@@ -1,22 +1,18 @@
 name: Ferry Cloudflare Demo
-
 on:
   push:
     branches: [main]
   workflow_dispatch:
     inputs:
       keep_alive_minutes:
-        description: Keep ephemeral apps online (1-350 minutes)
+        description: Keep the ephemeral Ferry host online (1-350 minutes)
         required: false
         default: "350"
-
 permissions:
-  contents: read
-
+  contents: write
 concurrency:
   group: ferry-${{ github.repository }}
   cancel-in-progress: true
-
 jobs:
   deploy:
     runs-on: ubuntu-24.04
@@ -26,23 +22,19 @@ jobs:
       KEEP_ALIVE_MINUTES: ${{ inputs.keep_alive_minutes || '350' }}
       FERRY_IMAGE_CACHE: /tmp/ferry-image-cache
     steps:
-      - name: Checkout
-        uses: actions/checkout@v5
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
-      - name: Restore Ferry runtime images
-        id: ferry-cache
+      - id: ferry-cache
         uses: actions/cache/restore@v5
         with:
           path: /tmp/ferry-image-cache
-          key: ferry-runtime-${{ runner.os }}-amd64-dokku-0.37.7-v2
-      - name: Load Ferry runtime images
+          key: ferry-images-${{ runner.os }}-amd64-dokku-0.37.7-v1
+      - name: Load Ferry Docker images
         run: node scripts/load-runtime-images.mjs
-      - name: Save Ferry runtime images
-        if: steps.ferry-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v5
-        with:
-          path: /tmp/ferry-image-cache
-          key: ferry-runtime-${{ runner.os }}-amd64-dokku-0.37.7-v2
-      - name: Deploy all apps through Ferry
+      - name: Repair and validate deploy module
+        run: |
+          node --input-type=module -e "import{readFileSync,writeFileSync}from'node:fs';const p='scripts/deploy-ferry.mjs';let s=readFileSync(p,'utf8');s=s.replace(\"Object.assign(process.env, parseEnv(readFileSync(join(root, '.env'), 'utf8'));\",\"Object.assign(process.env, parseEnv(readFileSync(join(root, '.env'), 'utf8')));\");writeFileSync(p,s)"
+          node --check scripts/deploy-ferry.mjs
+      - name: Deploy through Ferry
         run: node scripts/deploy-ferry.mjs

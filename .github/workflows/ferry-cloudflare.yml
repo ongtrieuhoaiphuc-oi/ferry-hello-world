@@ -45,15 +45,4 @@ jobs:
           path: /tmp/ferry-image-cache
           key: ferry-runtime-${{ runner.os }}-amd64-dokku-0.37.7-v2
       - name: Deploy all apps through Ferry
-        id: deploy
-        continue-on-error: true
-        shell: bash
-        run: |
-          set -o pipefail
-          node scripts/deploy-ferry.mjs 2>&1 | tee /tmp/mjs-deploy.log
-      - name: Report MJS deploy failure
-        if: steps.deploy.outcome == 'failure'
-        run: |
-          message=$(tail -n 100 /tmp/mjs-deploy.log | tr '\n' ' ' | cut -c1-6000)
-          echo "::error title=MJS deploy failed::$message"
-          exit 1
+        run: node scripts/deploy-ferry.mjs

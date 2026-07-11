@@ -1,18 +1,22 @@
 name: Ferry Cloudflare Demo
+
 on:
   push:
     branches: [main]
   workflow_dispatch:
     inputs:
       keep_alive_minutes:
-        description: Keep the ephemeral Ferry host online (1-350 minutes)
+        description: Keep both ephemeral apps online (1-350 minutes)
         required: false
         default: "350"
+
 permissions:
-  contents: write
+  contents: read
+
 concurrency:
   group: ferry-${{ github.repository }}
   cancel-in-progress: true
+
 jobs:
   deploy:
     runs-on: ubuntu-24.04
@@ -22,34 +26,39 @@ jobs:
       KEEP_ALIVE_MINUTES: ${{ inputs.keep_alive_minutes || '350' }}
       FERRY_IMAGE_CACHE: /tmp/ferry-image-cache
     steps:
-      - uses: actions/checkout@v5
+      - name: Checkout
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
-      - id: ferry-cache
+
+      - name: Restore Ferry runtime images
+        id: ferry-cache
         uses: actions/cache/restore@v5
         with:
           path: /tmp/ferry-image-cache
-          key: ferry-images-${{ runner.os }}-amd64-dokku-0.37.7-v1
-      - name: Load Ferry Docker images
-        run: zstd -dc "$FERRY_IMAGE_CACHE/images.tar.zst" | docker load
-      - name: Patch Ferry with Node.js
-        run: node scripts/patch-ferry-runtime.mjs
-      - name: Deploy with Ferry through Cloudflare
-        id: ferry-deploy
-        continue-on-error: true
-        shell: bash
-        run: bash scripts/ferry-cloudflare-action.sh 2>&1 | tee /tmp/ferry-deploy.log
-      - name: Publish sanitized failure diagnostics
-        if: steps.ferry-deploy.outcome == 'failure'
+          key: ferry-runtime-${{ runner.os }}-amd64-dokku-0.37.7-v2
+
+      - name: Load or download Ferry runtime images
         shell: bash
         run: |
-          { echo '# Ferry failure diagnostics'; echo '```text'; tail -n 220 /tmp/ferry-deploy.log | sed -E 's/(X-Auth-Key:|Authorization: Bearer|TUNNEL_TOKEN=).*/\1 [REDACTED]/Ig'; echo '```'; } > ferry-diagnostic.md
-          git config user.name github-actions
-          git config user.email github-actions@users.noreply.github.com
-          git add ferry-diagnostic.md
-          git commit -m 'Record Ferry diagnostics [skip ci]'
-          git push origin HEAD:main
-          exit 1
-      - name: Confirm public deployment
-        if: steps.ferry-deploy.outcome == 'success'
-        run: echo "Ferry is publicly reachable"
+          set -Eeuo pipefail
+          mkdir -p "$FERRY_IMAGE_CACHE"
+          archive="$FERRY_IMAGE_CACHE/runtime.tar.zst"
+          if [[ -s "$archive" ]]; then
+            zstd -dc "$archive" | docker load
+          else
+            docker pull dokku/dokku:0.37.7
+            docker pull cloudflare/cloudflared:latest
+            docker save dokku/dokku:0.37.7 cloudflare/cloudflared:latest | zstd -T0 -3 -o "$archive"
+          fi
+
+      - name: Save Ferry runtime images
+        if: steps.ferry-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: /tmp/ferry-image-cache
+          key: ferry-runtime-${{ runner.os }}-amd64-dokku-0.37.7-v2
+
+      - name: Deploy hello and hello2 through Ferry
+        shell: bash
+        run: bash scripts/deploy-ferry.sh

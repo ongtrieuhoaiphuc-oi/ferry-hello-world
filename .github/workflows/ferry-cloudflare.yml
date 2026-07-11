@@ -1,17 +1,17 @@
 name: Ferry Cloudflare Demo
 on:
   push:
-    branches: [main]
+    branches: [main, no-dokku]
   workflow_dispatch:
     inputs:
       keep_alive_minutes:
-        description: Keep the ephemeral Ferry host online (1-350 minutes)
+        description: Keep the ephemeral host online (1-350 minutes)
         required: false
         default: "350"
 permissions:
   contents: read
 concurrency:
-  group: ferry-${{ github.repository }}
+  group: ferry-${{ github.repository }}-${{ github.ref_name }}
   cancel-in-progress: true
 jobs:
   deploy:
@@ -32,12 +32,12 @@ jobs:
         run: |
           mkdir -p "$FERRY_LOG_DIR/steps" "$FERRY_LOG_DIR/apps/hello" "$FERRY_LOG_DIR/apps/hello2" "$FERRY_LOG_DIR/apps/omiroute" "$FERRY_LOG_DIR/system"
           node scripts/workflow-log.mjs event start "workflow initialized" | tee "$FERRY_LOG_DIR/steps/00-initialize.log"
-      - name: Restore Ferry runtime images
+      - name: Restore runtime images
         id: runtime_cache
         uses: actions/cache/restore@v5
         with:
           path: /tmp/ferry-runtime-cache
-          key: ferry-runtime-${{ runner.os }}-amd64-dokku-0.37.7-v3
+          key: ferry-runtime-${{ runner.os }}-amd64-cloudflared-v1
       - name: Restore application images
         id: app_cache
         uses: actions/cache/restore@v5
@@ -47,23 +47,9 @@ jobs:
       - name: Load runtime and application images
         id: load_images
         run: node scripts/load-runtime-images.mjs 2>&1 | tee "$FERRY_LOG_DIR/steps/11-load-images.log"
-      - name: Patch direct container routing and strict identity checks
-        run: |
-          node --input-type=module - <<'NODE'
-          import { readFileSync, writeFileSync } from 'node:fs';
-          const path = 'scripts/deploy-ferry.mjs';
-          let source = readFileSync(path, 'utf8');
-          const ingressBefore = "const ingress = apps.map((app) => ({ hostname: app.host, service: 'http://dokku:80' }));";
-          const ingressAfter = "const ingress = apps.map((app) => ({ hostname: app.host, service: `http://${app.name}.web.1:${app.port}` }));";
-          const omniBefore = "health: '/api/monitoring/health', marker: null";
-          const omniAfter = "health: '/', marker: 'OmniRoute'";
-          if (!source.includes(ingressBefore) || !source.includes(omniBefore)) throw new Error('Deployment patch marker missing');
-          writeFileSync(path, source.replace(ingressBefore, ingressAfter).replace(omniBefore, omniAfter));
-          NODE
-          node --check scripts/deploy-ferry.mjs
       - name: Deploy and verify all apps
         id: deploy
-        run: node scripts/deploy-ferry.mjs 2>&1 | tee "$FERRY_LOG_DIR/steps/21-deploy.log"
+        run: node scripts/deploy-compose.mjs 2>&1 | tee "$FERRY_LOG_DIR/steps/21-deploy.log"
       - name: Collect per-app and system diagnostics
         if: always()
         continue-on-error: true

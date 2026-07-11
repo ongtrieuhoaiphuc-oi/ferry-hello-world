@@ -7,7 +7,7 @@ const runtimeDir = process.env.FERRY_RUNTIME_CACHE || '/tmp/ferry-runtime-cache'
 const appDir = process.env.FERRY_APP_CACHE || '/tmp/ferry-app-cache';
 const runtimeArchive = join(runtimeDir, 'runtime.tar.zst');
 const appArchive = join(appDir, 'apps.tar.zst');
-const runtimeImages = ['dokku/dokku:0.37.7', 'cloudflare/cloudflared:latest'];
+const runtimeImages = ['cloudflare/cloudflared:latest'];
 const apps = [
   { tag: 'ferry-ci/ferry-hello-world:cached', context: root },
   { tag: 'ferry-ci/hello2:cached', context: join(root, 'apps/hello2') },
@@ -56,11 +56,11 @@ async function saveArchive(images, archive) {
 
 async function prepareRuntime() {
   if (existsSync(runtimeArchive)) {
-    console.log('[cache] Loading Ferry runtime images');
+    console.log('[cache] Loading runtime images');
     await loadArchive(runtimeArchive);
     return;
   }
-  console.log('[cache] Pulling Ferry runtime images');
+  console.log('[cache] Pulling runtime images');
   for (const image of runtimeImages) run('docker', ['pull', image]);
   await saveArchive(runtimeImages, runtimeArchive);
 }

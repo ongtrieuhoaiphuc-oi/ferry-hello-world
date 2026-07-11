@@ -1,0 +1,70 @@
+name: ferry-edge
+
+# Dokku-free edge stack: Cloudflare Tunnel ingress routes each hostname
+# straight to a compose service over the shared `edge` network.
+# Deploy script (scripts/deploy-compose.mjs) provisions the tunnel, DNS,
+# and remote ingress config, then brings this stack up.
+
+networks:
+  edge:
+    driver: bridge
+
+volumes:
+  omiroute-data:
+
+services:
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run --token ${TUNNEL_TOKEN}
+    networks: [edge]
+    depends_on:
+      hello1:
+        condition: service_healthy
+      hello2:
+        condition: service_healthy
+      omiroute:
+        condition: service_started
+
+  hello1:
+    image: ferry-ci/ferry-hello-world:cached
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+    networks: [edge]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/health"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  hello2:
+    image: ferry-ci/hello2:cached
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+    networks: [edge]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/health"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  omiroute:
+    image: ferry-ci/omiroute:cached
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      HOSTNAME: 0.0.0.0
+      PORT: "20128"
+      DATA_DIR: /app/data
+      OMNIROUTE_MEMORY_MB: "768"
+      NODE_OPTIONS: --max-old-space-size=768
+      INITIAL_PASSWORD: ${OMNIROUTE_INITIAL_PASSWORD}
+    volumes:
+      - omiroute-data:/app/data
+    networks: [edge]

@@ -24,7 +24,7 @@ jobs:
     env:
       FERRY_ENV_RAW: ${{ secrets.FERRY_ENV }}
       KEEP_ALIVE_MINUTES: ${{ inputs.keep_alive_minutes || '350' }}
-      FERRY_IMAGE_CACHE: ${{ runner.temp }}/ferry-image-cache
+      FERRY_IMAGE_CACHE: /tmp/ferry-image-cache
     steps:
       - name: Checkout app
         uses: actions/checkout@v4
@@ -35,7 +35,7 @@ jobs:
         id: ferry-cache
         uses: actions/cache@v4
         with:
-          path: ${{ env.FERRY_IMAGE_CACHE }}
+          path: /tmp/ferry-image-cache
           key: ferry-images-${{ runner.os }}-amd64-dokku-0.37.7-v1
 
       - name: Load or warm Ferry Docker images

@@ -47,7 +47,10 @@ jobs:
       - name: Deploy all apps through Ferry
         id: deploy
         continue-on-error: true
-        run: node scripts/deploy-ferry.mjs 2>&1 | tee /tmp/mjs-deploy.log
+        shell: bash
+        run: |
+          set -o pipefail
+          node scripts/deploy-ferry.mjs 2>&1 | tee /tmp/mjs-deploy.log
       - name: Report MJS deploy failure
         if: steps.deploy.outcome == 'failure'
         run: |

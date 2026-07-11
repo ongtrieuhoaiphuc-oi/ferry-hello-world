@@ -9,8 +9,6 @@ const runtimeArchive = join(runtimeDir, 'runtime.tar.zst');
 const appArchive = join(appDir, 'apps.tar.zst');
 const runtimeImages = ['dokku/dokku:0.37.7', 'cloudflare/cloudflared:latest'];
 const apps = [
-  { tag: 'ferry-ci/ferry-hello-world:cached', context: root },
-  { tag: 'ferry-ci/hello2:cached', context: join(root, 'apps/hello2') },
   { tag: 'ferry-ci/omiroute:cached', context: join(root, 'apps/omiroute') },
 ];
 
@@ -24,8 +22,7 @@ function pipeline(commandA, argsA, commandB, argsB) {
     const first = spawn(commandA, argsA, { stdio: ['ignore', 'pipe', 'inherit'] });
     const second = spawn(commandB, argsB, { stdio: ['pipe', 'inherit', 'inherit'] });
     first.stdout.pipe(second.stdin);
-    let firstCode;
-    let secondCode;
+    let firstCode, secondCode;
     const finish = () => {
       if (firstCode === undefined || secondCode === undefined) return;
       if (firstCode === 0 && secondCode === 0) resolvePromise();
@@ -46,35 +43,27 @@ function runAsync(command, args, options = {}) {
   });
 }
 
-async function loadArchive(archive) {
-  await pipeline('zstd', ['-dc', archive], 'docker', ['load']);
-}
-
-async function saveArchive(images, archive) {
-  await pipeline('docker', ['save', ...images], 'zstd', ['-T0', '-3', '-o', archive]);
-}
-
 async function prepareRuntime() {
   if (existsSync(runtimeArchive)) {
-    console.log('[cache] Loading Ferry runtime images');
-    await loadArchive(runtimeArchive);
+    console.log('[cache] Loading runtime images');
+    await pipeline('zstd', ['-dc', runtimeArchive], 'docker', ['load']);
     return;
   }
-  console.log('[cache] Pulling Ferry runtime images');
+  console.log('[pull] Downloading runtime images');
   for (const image of runtimeImages) run('docker', ['pull', image]);
-  await saveArchive(runtimeImages, runtimeArchive);
+  await pipeline('docker', ['save', ...runtimeImages], 'zstd', ['-T0', '-3', '-o', runtimeArchive]);
 }
 
 async function prepareApps() {
   if (existsSync(appArchive)) {
     console.log('[cache] Loading application images');
-    await loadArchive(appArchive);
+    await pipeline('zstd', ['-dc', appArchive], 'docker', ['load']);
     return;
   }
-  console.log('[build] Building all application images in parallel');
-  await Promise.all(apps.map((app) => runAsync('docker', ['build', '--tag', app.tag, app.context])));
-  await saveArchive(apps.map((app) => app.tag), appArchive);
+  console.log('[build] Building OmniRoute image');
+  await Promise.all(apps.map((a) => runAsync('docker', ['build', '--tag', a.tag, a.context])));
+  await pipeline('docker', ['save', ...apps.map((a) => a.tag)], 'zstd', ['-T0', '-3', '-o', appArchive]);
 }
 
 await Promise.all([prepareRuntime(), prepareApps()]);
-console.log('[cache] Runtime and application images are ready');
+console.log('[ready] All images loaded');

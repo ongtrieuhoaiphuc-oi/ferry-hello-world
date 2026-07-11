@@ -38,11 +38,14 @@ process.env.INITIAL_PASSWORD ||= randomBytes(24).toString('base64url');
 console.log(`::add-mask::${process.env.INITIAL_PASSWORD}`);
 
 const cfg = process.env;
-const apps = [
-  { name: cfg.HELLO1_APP, host: cfg.HELLO1_HOSTNAME || `${cfg.HELLO1_HOST_PREFIX}.${cfg.DOKKU_HOSTNAME}`, port: Number(cfg.HELLO1_PORT), memory: Number(cfg.HELLO1_MEMORY || 256), image: 'ferry-ci/ferry-hello-world:cached', health: '/health', marker: '"status":"ok"' },
-  { name: cfg.HELLO2_APP, host: cfg.HELLO2_HOSTNAME || `${cfg.HELLO2_HOST_PREFIX}.${cfg.DOKKU_HOSTNAME}`, port: Number(cfg.HELLO2_PORT), memory: Number(cfg.HELLO2_MEMORY || 256), image: 'ferry-ci/hello2:cached', health: '/health', marker: '"app":"hello2"' },
-  { name: cfg.OMNIROUTE_APP, host: cfg.OMNIROUTE_HOSTNAME || `${cfg.OMNIROUTE_HOST_PREFIX}.${cfg.DOKKU_HOSTNAME}`, port: Number(cfg.OMNIROUTE_PORT), memory: Number(cfg.OMNIROUTE_MEMORY || 1024), image: 'ferry-ci/omiroute:cached', health: '/api/monitoring/health' },
-];
+const app = {
+  name: cfg.OMNIROUTE_APP,
+  host: cfg.OMNIROUTE_HOSTNAME || `${cfg.OMNIROUTE_HOST_PREFIX}.${cfg.DOKKU_HOSTNAME}`,
+  port: Number(cfg.OMNIROUTE_PORT),
+  memory: Number(cfg.OMNIROUTE_MEMORY || 1024),
+  image: 'ferry-ci/omiroute:cached',
+  health: '/api/monitoring/health',
+};
 
 const headers = { 'X-Auth-Email': cfg.CF_EMAIL, 'X-Auth-Key': cfg.CF_GLOBAL_APIKEY, 'Content-Type': 'application/json' };
 async function cf(method, path, body) {
@@ -60,24 +63,8 @@ async function resolveZone(hostname, accountId) {
   }
   fail(`No Cloudflare zone for ${hostname}`);
 }
-function dokku(args, options = {}) { return run('docker', ['exec', 'dokku', 'dokku', ...args], options); }
+function dokku(args) { run('docker', ['exec', 'dokku', 'dokku', ...args]); }
 function dokkuOutput(args) { return output('docker', ['exec', 'dokku', 'dokku', ...args]); }
-async function waitApp(app) {
-  const url = `https://${app.host}${app.health}`;
-  let last = 'no response';
-  for (let attempt = 1; attempt <= 120; attempt += 1) {
-    try {
-      const response = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(10000) });
-      const body = await response.text();
-      last = `HTTP ${response.status}`;
-      if (response.status >= 200 && response.status < 400 && (!app.marker || body.includes(app.marker))) return;
-      if (response.status < 400) last += ' wrong app response';
-    } catch (error) { last = error.name; }
-    if (attempt % 12 === 0) log(`Waiting for ${url}: ${last}`);
-    await sleep(5000);
-  }
-  fail(`${url} failed: ${last}`);
-}
 
 async function main() {
   mkdirSync(stateDir, { recursive: true });
@@ -89,14 +76,12 @@ async function main() {
   if (!tunnel) tunnel = await cf('POST', `/accounts/${accountId}/cfd_tunnel`, { name: cfg.TUNNEL_NAME, tunnel_secret: output('openssl', ['rand', '-base64', '32']), config_src: 'cloudflare' });
   const tunnelToken = await cf('GET', `/accounts/${accountId}/cfd_tunnel/${tunnel.id}/token`);
 
-  log('Reconciling DNS records in parallel');
-  await Promise.all(apps.map(async (app) => {
-    const zoneId = await resolveZone(app.host, accountId);
-    const records = await cf('GET', `/zones/${zoneId}/dns_records?type=CNAME&name=${encodeURIComponent(app.host)}&per_page=1`);
-    const payload = { type: 'CNAME', name: app.host, content: `${tunnel.id}.cfargotunnel.com`, proxied: true, ttl: 1 };
-    if (records[0]?.id) await cf('PUT', `/zones/${zoneId}/dns_records/${records[0].id}`, payload);
-    else await cf('POST', `/zones/${zoneId}/dns_records`, payload);
-  }));
+  log(`Reconciling DNS for ${app.host}`);
+  const zoneId = await resolveZone(app.host, accountId);
+  const records = await cf('GET', `/zones/${zoneId}/dns_records?type=CNAME&name=${encodeURIComponent(app.host)}&per_page=1`);
+  const payload = { type: 'CNAME', name: app.host, content: `${tunnel.id}.cfargotunnel.com`, proxied: true, ttl: 1 };
+  if (records[0]?.id) await cf('PUT', `/zones/${zoneId}/dns_records/${records[0].id}`, payload);
+  else await cf('POST', `/zones/${zoneId}/dns_records`, payload);
 
   writeFileSync(envFile, `TUNNEL_TOKEN=${tunnelToken}\nDOKKU_HOSTNAME=${cfg.DOKKU_HOSTNAME}\n`, { mode: 0o600 });
   try { output('docker', ['network', 'inspect', 'webserver']); } catch { run('docker', ['network', 'create', 'webserver']); }
@@ -110,41 +95,46 @@ async function main() {
   if (!ready) fail('Dokku failed to start');
   try { dokku(['network:set', '--global', 'attach-post-deploy', 'webserver']); } catch {}
 
-  log('Configuring Dokku apps directly');
-  const currentApps = new Set(dokkuOutput(['apps:list']).split(/\r?\n/).map((line) => line.trim()).filter((line) => /^[a-z0-9][a-z0-9-]*$/i.test(line)));
-  for (const app of apps) {
-    log(`Configuring ${app.name}`);
-    if (!currentApps.has(app.name)) dokku(['apps:create', app.name]);
-    dokku(['domains:set', app.name, app.host]);
-    dokku(['ports:set', app.name, `http:80:${app.port}`]);
-    dokku(['resource:limit', '--memory', String(app.memory), app.name]);
-    dokku(['network:set', app.name, 'attach-post-deploy', 'webserver']);
-  }
-  dokku(['config:set', '--no-restart', cfg.OMNIROUTE_APP,
-    `INITIAL_PASSWORD=${cfg.INITIAL_PASSWORD}`, 'HOSTNAME=0.0.0.0', `PORT=${cfg.OMNIROUTE_PORT}`,
+  log(`Configuring Dokku app: ${app.name}`);
+  const currentApps = new Set(dokkuOutput(['apps:list']).split(/\r?\n/).map((l) => l.trim()).filter((l) => /^[a-z0-9][a-z0-9-]*$/i.test(l)));
+  if (!currentApps.has(app.name)) dokku(['apps:create', app.name]);
+  dokku(['domains:set', app.name, app.host]);
+  dokku(['ports:set', app.name, `http:80:${app.port}`]);
+  dokku(['resource:limit', '--memory', String(app.memory), app.name]);
+  dokku(['network:set', app.name, 'attach-post-deploy', 'webserver']);
+  dokku(['config:set', '--no-restart', app.name,
+    `INITIAL_PASSWORD=${cfg.INITIAL_PASSWORD}`, 'HOSTNAME=0.0.0.0', `PORT=${app.port}`,
     'OMNIROUTE_MEMORY_MB=768', 'NODE_OPTIONS=--max-old-space-size=768']);
 
-  log('Releasing cached images sequentially');
-  for (const app of apps) {
-    log(`Releasing ${app.name}`);
-    dokku(['git:from-image', app.name, app.image]);
+  log(`Releasing ${app.name}`);
+  dokku(['git:from-image', app.name, app.image]);
+
+  log('Publishing Cloudflare ingress');
+  await cf('PUT', `/accounts/${accountId}/cfd_tunnel/${tunnel.id}/configurations`, {
+    config: { ingress: [{ hostname: app.host, service: 'http://dokku:80' }, { service: 'http_status:404' }] },
+  });
+  run('docker', ['compose', '--env-file', envFile, '-f', composeFile, 'restart', 'cloudflared']);
+
+  log(`Waiting for https://${app.host}${app.health}`);
+  let last = 'no response';
+  for (let attempt = 1; attempt <= 120; attempt += 1) {
+    try {
+      const response = await fetch(`https://${app.host}${app.health}`, { redirect: 'manual', signal: AbortSignal.timeout(10000) });
+      last = `HTTP ${response.status}`;
+      if (response.status >= 200 && response.status < 400) { log(`OmniRoute is live at https://${app.host}`); break; }
+    } catch (error) { last = error.name; }
+    if (attempt % 12 === 0) log(`Still waiting: ${last}`);
+    if (attempt === 120) fail(`Health check failed: ${last}`);
+    await sleep(5000);
   }
 
-  log('Publishing one combined Cloudflare ingress configuration');
-  const ingress = apps.map((app) => ({ hostname: app.host, service: 'http://dokku:80' }));
-  ingress.push({ service: 'http_status:404' });
-  await cf('PUT', `/accounts/${accountId}/cfd_tunnel/${tunnel.id}/configurations`, { config: { ingress } });
-  run('docker', ['compose', '--env-file', envFile, '-f', composeFile, 'restart', 'cloudflared']);
-  await Promise.all(apps.map(waitApp));
-
-  log('All apps are publicly reachable');
-  if (process.env.GITHUB_STEP_SUMMARY) writeFileSync(process.env.GITHUB_STEP_SUMMARY, apps.map((app) => `- https://${app.host}`).join('\n') + '\n', { flag: 'a' });
+  if (process.env.GITHUB_STEP_SUMMARY) writeFileSync(process.env.GITHUB_STEP_SUMMARY, `- https://${app.host}\n`, { flag: 'a' });
   const minutes = Number(cfg.KEEP_ALIVE_MINUTES || 350);
   if (!Number.isInteger(minutes) || minutes < 1 || minutes > 350) fail('KEEP_ALIVE_MINUTES must be 1-350');
   const deadline = Date.now() + minutes * 60000;
   while (Date.now() < deadline) {
     await sleep(30000);
-    await Promise.allSettled(apps.map((app) => fetch(`https://${app.host}${app.health}`, { signal: AbortSignal.timeout(10000) })));
+    try { await fetch(`https://${app.host}${app.health}`, { signal: AbortSignal.timeout(10000) }); } catch {}
   }
 }
 

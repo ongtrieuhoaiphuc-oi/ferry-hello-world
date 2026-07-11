@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync, rmSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 
 const root = process.env.GITHUB_WORKSPACE || resolve(import.meta.dirname, '..');
@@ -11,14 +11,6 @@ const fail = (message) => { throw new Error(message); };
 const run = (command, args, options = {}) => execFileSync(command, args, { stdio: 'inherit', ...options });
 const output = (command, args, options = {}) => execFileSync(command, args, { encoding: 'utf8', ...options }).trim();
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
-
-function runAsync(command, args, options = {}) {
-  return new Promise((resolvePromise, reject) => {
-    const child = spawn(command, args, { stdio: 'inherit', ...options });
-    child.on('error', reject);
-    child.on('close', (code) => code === 0 ? resolvePromise() : reject(new Error(`${command} ${args.join(' ')} exited ${code}`)));
-  });
-}
 
 function parseEnv(text) {
   const values = {};
@@ -124,17 +116,18 @@ async function main() {
   log('Creating all app infrastructure with Ferry');
   for (const app of apps) {
     run(ferryPath, ['deploy', app.name, '-H', app.host, '-p', String(app.port), '-m', String(app.memory), '-d', runtime, '--no-push', '-y'], { cwd: runtime, env: ferryEnv });
-  }
-
-  for (const app of apps) {
     try { run('docker', ['exec', 'dokku', 'dokku', 'network:set', app.name, 'attach-post-deploy', 'webserver']); } catch {}
   }
+
   run('docker', ['exec', 'dokku', 'dokku', 'config:set', '--no-restart', cfg.OMNIROUTE_APP,
     `INITIAL_PASSWORD=${cfg.INITIAL_PASSWORD}`, 'HOSTNAME=0.0.0.0', `PORT=${cfg.OMNIROUTE_PORT}`,
     'OMNIROUTE_MEMORY_MB=768', 'NODE_OPTIONS=--max-old-space-size=768']);
 
-  log('Releasing all application images in parallel');
-  await Promise.all(apps.map((app) => runAsync('docker', ['exec', 'dokku', 'dokku', 'git:from-image', app.name, app.image])));
+  log('Releasing application images sequentially to avoid Dokku nginx races');
+  for (const app of apps) {
+    log(`Releasing ${app.name}`);
+    run('docker', ['exec', 'dokku', 'dokku', 'git:from-image', app.name, app.image]);
+  }
 
   const ingress = apps.map((app) => ({ hostname: app.host, service: 'http://dokku:80' }));
   ingress.push({ service: 'http_status:404' });
@@ -153,4 +146,7 @@ async function main() {
   }
 }
 
-main().catch((error) => { console.error(`\n[ferry] ${error.stack || error.message}`); process.exit(1); });
+main().catch((error) => {
+  console.error(`\n[ferry] ${error.stack || error.message}`);
+  process.exit(1);
+});

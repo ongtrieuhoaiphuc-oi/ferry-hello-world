@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, rmSync, chmodSync } from 'node:fs';
+import { readFileSync, writeFileSync, rmSync, chmodSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -27,7 +27,7 @@ function parseEnv(text) {
   return values;
 }
 
-Object.assign(process.env, parseEnv(readFileSync(join(root, '.env'), 'utf8')));
+Object.assign(process.env, parseEnv(readFileSync(join(root, '.env'), 'utf8'));
 Object.assign(process.env, parseEnv(process.env.FERRY_ENV_RAW || ''));
 delete process.env.FERRY_ENV_RAW;
 for (const key of ['CF_EMAIL', 'CF_GLOBAL_APIKEY', 'DOKKU_HOSTNAME']) if (!process.env[key]) fail(`FERRY_ENV requires ${key}`);
@@ -65,12 +65,19 @@ async function waitHttp(url) {
   fail(`${url} failed public health check`);
 }
 function prepareGitRepo(directory, name) {
-  try { output('git', ['-C', directory, 'rev-parse', '--git-dir']); return; } catch {}
+  if (!existsSync(directory)) fail(`App directory does not exist: ${directory}`);
+  const gitEntry = join(directory, '.git');
+  if (existsSync(gitEntry)) {
+    output('git', ['-C', directory, 'rev-parse', '--show-toplevel']);
+    return;
+  }
+  log(`Initializing standalone Git repository for ${name}`);
   run('git', ['-C', directory, 'init', '-b', 'main']);
   run('git', ['-C', directory, 'config', 'user.name', 'github-actions']);
   run('git', ['-C', directory, 'config', 'user.email', 'github-actions@users.noreply.github.com']);
   run('git', ['-C', directory, 'add', '--all']);
-  run('git', ['-C', directory, 'commit', '-m', `Build ${name}`]);
+  run('git', ['-C', directory, 'commit', '--allow-empty', '-m', `Build ${name}`]);
+  if (!existsSync(gitEntry)) fail(`Failed to initialize standalone Git repository: ${directory}`);
 }
 
 async function main() {
@@ -97,14 +104,19 @@ async function main() {
   const source = readFileSync(ferryPath, 'utf8');
   const needle = '-H "Authorization: Bearer ${CF_API_TOKEN}"';
   if (!source.includes(needle)) fail('Unsupported Ferry Cloudflare authentication helper');
-  writeFileSync(ferryPath, source.replace(needle, '-H "X-Auth-Email: ${CF_EMAIL}"\n        -H "X-Auth-Key: ${CF_GLOBAL_APIKEY}"'));
+  writeFileSync(ferryPath, source.replace(needle, '-H "X-Auth-Email: ${CF_EMAIL}"\n -H "X-Auth-Key: ${CF_GLOBAL_APIKEY}"'));
   chmodSync(ferryPath, 0o755);
   writeFileSync(join(runtime, '.env'), `TUNNEL_ID=${tunnel.id}\nTUNNEL_TOKEN=${tunnelToken}\nDOKKU_HOSTNAME=${cfg.DOKKU_HOSTNAME}\nCF_ACCOUNT_ID=${accountId}\nCF_API_TOKEN=global-key-compat\nCF_EMAIL=${cfg.CF_EMAIL}\nCF_GLOBAL_APIKEY=${cfg.CF_GLOBAL_APIKEY}\n`);
 
   try { output('docker', ['network', 'inspect', 'webserver']); } catch { run('docker', ['network', 'create', 'webserver']); }
   try { output('docker', ['volume', 'inspect', 'dokku-data']); } catch { run('docker', ['volume', 'create', 'dokku-data']); }
   run('docker', ['compose', '-f', join(runtime, 'docker-compose.yml'), 'up', '-d']);
-  for (let i = 0; i < 90; i += 1) { try { output('docker', ['exec', 'dokku', 'dokku', 'version']); break; } catch { await new Promise((done) => setTimeout(done, 2000)); } }
+  let ready = false;
+  for (let i = 0; i < 90; i += 1) {
+    try { output('docker', ['exec', 'dokku', 'dokku', 'version']); ready = true; break; }
+    catch { await new Promise((done) => setTimeout(done, 2000)); }
+  }
+  if (!ready) fail('Dokku failed to start');
   try { run('docker', ['exec', 'dokku', 'dokku', 'network:set', '--global', 'attach-post-deploy', 'webserver']); } catch {}
   await cf('PUT', `/accounts/${accountId}/cfd_tunnel/${tunnel.id}/configurations`, { config: { ingress: [{ service: 'http_status:404' }] } });
 

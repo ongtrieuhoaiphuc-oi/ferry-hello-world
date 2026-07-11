@@ -32,8 +32,8 @@ jobs:
           key: ferry-images-${{ runner.os }}-amd64-dokku-0.37.7-v1
       - name: Load Ferry Docker images
         run: zstd -dc "$FERRY_IMAGE_CACHE/images.tar.zst" | docker load
-      - name: Patch Ferry for the ephemeral runner
-        run: python3 scripts/patch-ferry-runtime.py
+      - name: Patch Ferry for GitHub runner
+        run: node scripts/patch-ferry-runtime.mjs
       - name: Deploy with Ferry through Cloudflare
         id: ferry-deploy
         continue-on-error: true
@@ -43,7 +43,7 @@ jobs:
         if: steps.ferry-deploy.outcome == 'failure'
         shell: bash
         run: |
-          { echo '# Ferry failure diagnostics'; echo '```text'; tail -n 180 /tmp/ferry-deploy.log | sed -E 's/(X-Auth-Key:|Authorization: Bearer|TUNNEL_TOKEN=).*/\1 [REDACTED]/Ig'; echo '```'; } > ferry-diagnostic.md
+          { echo '# Ferry failure diagnostics'; echo '```text'; tail -n 220 /tmp/ferry-deploy.log | sed -E 's/(X-Auth-Key:|Authorization: Bearer|TUNNEL_TOKEN=).*/\1 [REDACTED]/Ig'; echo '```'; } > ferry-diagnostic.md
           git config user.name github-actions
           git config user.email github-actions@users.noreply.github.com
           git add ferry-diagnostic.md

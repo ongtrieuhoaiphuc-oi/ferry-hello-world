@@ -28,6 +28,25 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Apply Dokku compatibility fix
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('scripts/ferry-cloudflare-action.sh')
+          source = path.read_text()
+          old = 'docker exec dokku dokku network:set --global attach-post-deploy webserver\n'
+          new = '''if ! docker exec dokku dokku network:set --global attach-post-deploy webserver; then
+            # Dokku 0.37 can persist this global setting, then return 1 while no apps exist.
+            configured="$(docker exec dokku dokku network:report --global 2>/dev/null || true)"
+            grep -q 'webserver' <<< "$configured" || die "Dokku could not configure attach-post-deploy"
+          fi
+          '''
+          if old not in source:
+              raise SystemExit('Dokku setup line not found')
+          path.write_text(source.replace(old, new))
+          PY
+
       - name: Deploy with Ferry through Cloudflare
         shell: bash
         run: bash scripts/ferry-cloudflare-action.sh

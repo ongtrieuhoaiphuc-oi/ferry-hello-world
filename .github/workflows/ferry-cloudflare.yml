@@ -22,17 +22,17 @@ jobs:
       KEEP_ALIVE_MINUTES: ${{ inputs.keep_alive_minutes || '350' }}
       FERRY_IMAGE_CACHE: /tmp/ferry-image-cache
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
       - id: ferry-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: /tmp/ferry-image-cache
           key: ferry-images-${{ runner.os }}-amd64-dokku-0.37.7-v1
       - name: Load Ferry Docker images
         run: zstd -dc "$FERRY_IMAGE_CACHE/images.tar.zst" | docker load
-      - name: Patch Ferry for GitHub runner
+      - name: Patch Ferry with Node.js
         run: node scripts/patch-ferry-runtime.mjs
       - name: Deploy with Ferry through Cloudflare
         id: ferry-deploy

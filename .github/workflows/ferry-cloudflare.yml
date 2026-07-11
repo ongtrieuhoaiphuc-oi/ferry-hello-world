@@ -1,5 +1,4 @@
 name: Ferry Cloudflare Demo
-
 on:
   push:
     branches: [main]
@@ -9,14 +8,11 @@ on:
         description: Keep the ephemeral Ferry host online (1-350 minutes)
         required: false
         default: "350"
-
 permissions:
   contents: write
-
 concurrency:
   group: ferry-${{ github.repository }}
   cancel-in-progress: true
-
 jobs:
   deploy:
     runs-on: ubuntu-24.04
@@ -26,18 +22,14 @@ jobs:
       KEEP_ALIVE_MINUTES: ${{ inputs.keep_alive_minutes || '350' }}
       FERRY_IMAGE_CACHE: /tmp/ferry-image-cache
     steps:
-      - name: Checkout app
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: Restore Ferry Docker image cache
-        id: ferry-cache
+      - id: ferry-cache
         uses: actions/cache/restore@v4
         with:
           path: /tmp/ferry-image-cache
           key: ferry-images-${{ runner.os }}-amd64-dokku-0.37.7-v1
-
       - name: Load or warm Ferry Docker images
         shell: bash
         run: |
@@ -51,62 +43,41 @@ jobs:
             docker pull cloudflare/cloudflared:latest
             docker save dokku/dokku:0.37.7 cloudflare/cloudflared:latest | zstd -T0 -3 -o "$archive"
           fi
-
-      - name: Save Ferry Docker image cache
-        if: steps.ferry-cache.outputs.cache-hit != 'true'
+      - if: steps.ferry-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: /tmp/ferry-image-cache
           key: ferry-images-${{ runner.os }}-amd64-dokku-0.37.7-v1
-
       - name: Apply GitHub runner compatibility fixes
         shell: bash
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          path = Path('scripts/ferry-cloudflare-action.sh')
-          source = path.read_text()
-          replacements = {
-            'docker exec dokku dokku network:set --global attach-post-deploy webserver\n': 'docker exec dokku dokku network:set --global attach-post-deploy webserver || log "Dokku network setting returned non-zero; continuing"\n',
-            'ssh-keyscan -p 3022 localhost >> "$HOME/.ssh/known_hosts" 2>/dev/null\n': '''ssh_ready=false
-for _ in $(seq 1 60); do
-  if ssh-keyscan -p 3022 localhost >> "$HOME/.ssh/known_hosts" 2>/dev/null; then ssh_ready=true; break; fi
-  sleep 2
-done
-$ssh_ready || die "Dokku SSH did not become ready"
-'''
-          }
-          for old, new in replacements.items():
-              if old not in source:
-                  raise SystemExit(f'Compatibility target not found: {old[:40]}')
-              source = source.replace(old, new)
-          path.write_text(source)
+          p = Path('scripts/ferry-cloudflare-action.sh')
+          s = p.read_text()
+          s = s.replace('docker exec dokku dokku network:set --global attach-post-deploy webserver\n', 'docker exec dokku dokku network:set --global attach-post-deploy webserver || log "Dokku network setting returned non-zero; continuing"\n')
+          old = 'ssh-keyscan -p 3022 localhost >> "$HOME/.ssh/known_hosts" 2>/dev/null\n'
+          new = 'ssh_ready=false\nfor _ in $(seq 1 60); do\n  if ssh-keyscan -p 3022 localhost >> "$HOME/.ssh/known_hosts" 2>/dev/null; then ssh_ready=true; break; fi\n  sleep 2\ndone\n$ssh_ready || die "Dokku SSH did not become ready"\n'
+          if old not in s:
+              raise SystemExit('SSH patch target missing')
+          p.write_text(s.replace(old, new))
           PY
-
       - name: Deploy with Ferry through Cloudflare
         id: ferry-deploy
         continue-on-error: true
         shell: bash
         run: bash scripts/ferry-cloudflare-action.sh 2>&1 | tee /tmp/ferry-deploy.log
-
       - name: Publish sanitized failure diagnostics
         if: steps.ferry-deploy.outcome == 'failure'
         shell: bash
         run: |
-          {
-            echo '# Ferry failure diagnostics'
-            echo
-            echo '```text'
-            tail -n 120 /tmp/ferry-deploy.log | sed -E 's/(X-Auth-Key:|Authorization: Bearer|TUNNEL_TOKEN=).*/\1 [REDACTED]/Ig'
-            echo '```'
-          } > ferry-diagnostic.md
+          { echo '# Ferry failure diagnostics'; echo '```text'; tail -n 140 /tmp/ferry-deploy.log | sed -E 's/(X-Auth-Key:|Authorization: Bearer|TUNNEL_TOKEN=).*/\1 [REDACTED]/Ig'; echo '```'; } > ferry-diagnostic.md
           git config user.name github-actions
           git config user.email github-actions@users.noreply.github.com
           git add ferry-diagnostic.md
           git commit -m 'Record Ferry diagnostics [skip ci]'
           git push origin HEAD:main
           exit 1
-
       - name: Confirm public deployment
         if: steps.ferry-deploy.outcome == 'success'
         run: echo "Ferry is publicly reachable"

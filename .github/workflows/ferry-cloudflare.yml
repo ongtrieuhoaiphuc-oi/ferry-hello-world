@@ -32,30 +32,8 @@ jobs:
           key: ferry-images-${{ runner.os }}-amd64-dokku-0.37.7-v1
       - name: Load Ferry Docker images
         run: zstd -dc "$FERRY_IMAGE_CACHE/images.tar.zst" | docker load
-      - name: Apply GitHub runner compatibility fixes
-        shell: bash
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path('scripts/ferry-cloudflare-action.sh')
-          s = p.read_text()
-          s = s.replace('docker exec dokku dokku network:set --global attach-post-deploy webserver\n', 'docker exec dokku dokku network:set --global attach-post-deploy webserver || log "Dokku network setting returned non-zero; continuing"\n')
-          old_ssh = 'ssh-keyscan -p 3022 localhost >> "$HOME/.ssh/known_hosts" 2>/dev/null\n'
-          new_ssh = 'ssh_ready=false\nfor _ in $(seq 1 60); do\n  if ssh-keyscan -p 3022 localhost >> "$HOME/.ssh/known_hosts" 2>/dev/null; then ssh_ready=true; break; fi\n  sleep 2\ndone\n$ssh_ready || die "Dokku SSH did not become ready"\n'
-          if old_ssh not in s:
-              raise SystemExit('SSH patch target missing')
-          s = s.replace(old_ssh, new_ssh)
-          marker = 'log "Deploying the checked-out app through Ferry"\n'
-          ingress = '''log "Initializing Cloudflare ingress before Ferry preflight"
-ingress_payload="$(jq -nc --arg host "$APP_HOSTNAME" '{config:{ingress:[{hostname:$host,service:"http://dokku:80"},{service:"http_status:404"}]}}')"
-cf_result "$(cf PUT "/accounts/$CF_ACCOUNT_ID/cfd_tunnel/$TUNNEL_ID/configurations" "$ingress_payload")" >/dev/null
-
-log "Deploying the checked-out app through Ferry"
-'''
-          if marker not in s:
-              raise SystemExit('Deploy marker missing')
-          p.write_text(s.replace(marker, ingress, 1))
-          PY
+      - name: Patch Ferry for the ephemeral runner
+        run: python3 scripts/patch-ferry-runtime.py
       - name: Deploy with Ferry through Cloudflare
         id: ferry-deploy
         continue-on-error: true
@@ -65,7 +43,7 @@ log "Deploying the checked-out app through Ferry"
         if: steps.ferry-deploy.outcome == 'failure'
         shell: bash
         run: |
-          { echo '# Ferry failure diagnostics'; echo '```text'; tail -n 160 /tmp/ferry-deploy.log | sed -E 's/(X-Auth-Key:|Authorization: Bearer|TUNNEL_TOKEN=).*/\1 [REDACTED]/Ig'; echo '```'; } > ferry-diagnostic.md
+          { echo '# Ferry failure diagnostics'; echo '```text'; tail -n 180 /tmp/ferry-deploy.log | sed -E 's/(X-Auth-Key:|Authorization: Bearer|TUNNEL_TOKEN=).*/\1 [REDACTED]/Ig'; echo '```'; } > ferry-diagnostic.md
           git config user.name github-actions
           git config user.email github-actions@users.noreply.github.com
           git add ferry-diagnostic.md

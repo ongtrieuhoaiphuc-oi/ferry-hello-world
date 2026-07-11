@@ -33,7 +33,7 @@ jobs:
 
       - name: Restore Ferry Docker image cache
         id: ferry-cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: /tmp/ferry-image-cache
           key: ferry-images-${{ runner.os }}-amd64-dokku-0.37.7-v1
@@ -44,20 +44,23 @@ jobs:
           set -Eeuo pipefail
           mkdir -p "$FERRY_IMAGE_CACHE"
           archive="$FERRY_IMAGE_CACHE/images.tar.zst"
-
           if [[ -s "$archive" ]]; then
-            echo "Loading Ferry images from the GitHub Actions cache"
+            echo "Loading Ferry images from cache"
             zstd -dc "$archive" | docker load
           else
-            echo "Cache miss, pulling Ferry images"
             docker pull dokku/dokku:0.37.7
             docker pull cloudflare/cloudflared:latest
-            docker save dokku/dokku:0.37.7 cloudflare/cloudflared:latest \
-              | zstd -T0 -3 -o "$archive"
+            docker save dokku/dokku:0.37.7 cloudflare/cloudflared:latest | zstd -T0 -3 -o "$archive"
           fi
-
           docker image inspect dokku/dokku:0.37.7 >/dev/null
           docker image inspect cloudflare/cloudflared:latest >/dev/null
+
+      - name: Save Ferry Docker image cache
+        if: steps.ferry-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/ferry-image-cache
+          key: ferry-images-${{ runner.os }}-amd64-dokku-0.37.7-v1
 
       - name: Apply Dokku compatibility fix
         shell: bash
@@ -68,7 +71,6 @@ jobs:
           source = path.read_text()
           old = 'docker exec dokku dokku network:set --global attach-post-deploy webserver\n'
           new = '''if ! docker exec dokku dokku network:set --global attach-post-deploy webserver; then
-            # Dokku 0.37 can persist this global setting, then return 1 while no apps exist.
             configured="$(docker exec dokku dokku network:report --global 2>/dev/null || true)"
             grep -q 'webserver' <<< "$configured" || die "Dokku could not configure attach-post-deploy"
           fi
@@ -80,4 +82,17 @@ jobs:
 
       - name: Deploy with Ferry through Cloudflare
         shell: bash
-        run: bash scripts/ferry-cloudflare-action.sh
+        run: |
+          set +e
+          bash scripts/ferry-cloudflare-action.sh 2>&1 | tee /tmp/ferry-deploy.log
+          status=${PIPESTATUS[0]}
+          if (( status != 0 )); then
+            {
+              echo '### Ferry deploy diagnostics'
+              echo '```text'
+              tail -n 80 /tmp/ferry-deploy.log \
+                | sed -E 's/(X-Auth-Key:|Authorization: Bearer|TUNNEL_TOKEN=).*/\1 [REDACTED]/Ig'
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$status"

@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       keep_alive_minutes:
-        description: Keep both ephemeral apps online (1-350 minutes)
+        description: Keep ephemeral apps online (1-350 minutes)
         required: false
         default: "350"
 
@@ -30,51 +30,23 @@ jobs:
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
+
       - name: Restore Ferry runtime images
         id: ferry-cache
         uses: actions/cache/restore@v5
         with:
           path: /tmp/ferry-image-cache
           key: ferry-runtime-${{ runner.os }}-amd64-dokku-0.37.7-v2
-      - name: Load or download Ferry runtime images
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          mkdir -p "$FERRY_IMAGE_CACHE"
-          archive="$FERRY_IMAGE_CACHE/runtime.tar.zst"
-          if [[ -s "$archive" ]]; then zstd -dc "$archive" | docker load
-          else
-            docker pull dokku/dokku:0.37.7
-            docker pull cloudflare/cloudflared:latest
-            docker save dokku/dokku:0.37.7 cloudflare/cloudflared:latest | zstd -T0 -3 -o "$archive"
-          fi
+
+      - name: Load Ferry runtime images
+        run: node scripts/load-runtime-images.mjs
+
       - name: Save Ferry runtime images
         if: steps.ferry-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v5
         with:
           path: /tmp/ferry-image-cache
           key: ferry-runtime-${{ runner.os }}-amd64-dokku-0.37.7-v2
-      - name: Prepare hello2 source repository
-        shell: bash
-        run: |
-          git -C apps/hello2 init -b main
-          git -C apps/hello2 config user.name github-actions
-          git -C apps/hello2 config user.email github-actions@users.noreply.github.com
-          git -C apps/hello2 add --all
-          git -C apps/hello2 commit -m "Build hello2"
-      - name: Deploy hello and hello2 through Ferry
-        id: deploy
-        continue-on-error: true
-        shell: bash
-        run: |
-          set +e
-          bash scripts/deploy-ferry.sh 2>&1 | tee /tmp/ferry-deploy.log
-          exit ${PIPESTATUS[0]}
-      - name: Report sanitized deploy failure
-        if: steps.deploy.outcome == 'failure'
-        shell: bash
-        run: |
-          tail -n 80 /tmp/ferry-deploy.log | sed -E 's/(X-Auth-Key:|Authorization: Bearer|TUNNEL_TOKEN=).*/\1 [REDACTED]/Ig' > /tmp/ferry-error.txt
-          message=$(tr '\n' ' ' < /tmp/ferry-error.txt | cut -c1-4000)
-          echo "::error title=Ferry deploy failed::$message"
-          exit 1
+
+      - name: Deploy all apps through Ferry
+        run: node scripts/deploy-ferry.mjs

@@ -1,0 +1,7 @@
+{
+  "name": "ferry-omniroute",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": { "start": "npx --yes omniroute@latest" },
+  "engines": { "node": ">=22" }
+}

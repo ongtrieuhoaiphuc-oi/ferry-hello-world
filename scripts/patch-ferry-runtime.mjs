@@ -35,7 +35,7 @@ export CF_API_TOKEN=global-key-compat
 )
 
 log "Building app image on the shared Docker daemon"
-IMAGE_TAG="ferry-ci/$APP_NAME:${GITHUB_SHA:-latest}"
+IMAGE_TAG="ferry-ci/$APP_NAME:\${GITHUB_SHA:-latest}"
 docker build --tag "$IMAGE_TAG" "$ROOT"
 docker exec dokku dokku network:set "$APP_NAME" attach-post-deploy webserver || true
 log "Releasing image through Dokku without SSH"

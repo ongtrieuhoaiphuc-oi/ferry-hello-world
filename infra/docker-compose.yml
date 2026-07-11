@@ -1,0 +1,37 @@
+services:
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: cloudflared
+    command: tunnel run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN}
+    networks: [webserver]
+    mem_limit: 256m
+    restart: unless-stopped
+    depends_on:
+      dokku:
+        condition: service_started
+
+  dokku:
+    image: dokku/dokku:0.37.7
+    container_name: dokku
+    hostname: ${DOKKU_HOSTNAME:-apps.local}
+    environment:
+      DOKKU_HOSTNAME: ${DOKKU_HOSTNAME:-apps.local}
+      DOKKU_HOST_ROOT: /var/lib/dokku/home/dokku
+      DOKKU_LIB_HOST_ROOT: /var/lib/dokku/var/lib/dokku
+    volumes:
+      - dokku-data:/mnt/dokku
+      - /var/run/docker.sock:/var/run/docker.sock
+    pid: host
+    mem_limit: 512m
+    networks: [webserver]
+    restart: unless-stopped
+
+networks:
+  webserver:
+    external: true
+
+volumes:
+  dokku-data:
+    external: true

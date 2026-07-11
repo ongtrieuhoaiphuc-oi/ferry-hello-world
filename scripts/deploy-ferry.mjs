@@ -1,12 +1,14 @@
-import { readFileSync, writeFileSync, rmSync, chmodSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 
 const root = process.env.GITHUB_WORKSPACE || resolve(import.meta.dirname, '..');
-const runtime = join(process.env.RUNNER_TEMP || tmpdir(), 'ferry-runtime');
-const log = (message) => console.log(`\n\x1b[36m[ferry]\x1b[0m ${message}`);
+const stateDir = join(process.env.RUNNER_TEMP || tmpdir(), 'ferry-direct');
+const composeFile = join(root, 'infra/docker-compose.yml');
+const envFile = join(stateDir, '.env');
+const log = (message) => console.log(`\n\x1b[36m[deploy]\x1b[0m ${message}`);
 const fail = (message) => { throw new Error(message); };
 const run = (command, args, options = {}) => execFileSync(command, args, { stdio: 'inherit', ...options });
 const output = (command, args, options = {}) => execFileSync(command, args, { encoding: 'utf8', ...options }).trim();
@@ -39,7 +41,7 @@ const cfg = process.env;
 const apps = [
   { name: cfg.HELLO1_APP, host: cfg.HELLO1_HOSTNAME || `${cfg.HELLO1_HOST_PREFIX}.${cfg.DOKKU_HOSTNAME}`, port: Number(cfg.HELLO1_PORT), memory: Number(cfg.HELLO1_MEMORY || 256), image: 'ferry-ci/ferry-hello-world:cached', health: '/health', marker: '"status":"ok"' },
   { name: cfg.HELLO2_APP, host: cfg.HELLO2_HOSTNAME || `${cfg.HELLO2_HOST_PREFIX}.${cfg.DOKKU_HOSTNAME}`, port: Number(cfg.HELLO2_PORT), memory: Number(cfg.HELLO2_MEMORY || 256), image: 'ferry-ci/hello2:cached', health: '/health', marker: '"app":"hello2"' },
-  { name: cfg.OMNIROUTE_APP, host: cfg.OMNIROUTE_HOSTNAME || `${cfg.OMNIROUTE_HOST_PREFIX}.${cfg.DOKKU_HOSTNAME}`, port: Number(cfg.OMNIROUTE_PORT), memory: Number(cfg.OMNIROUTE_MEMORY || 1024), image: 'ferry-ci/omiroute:cached', health: '/api/monitoring/health', marker: null },
+  { name: cfg.OMNIROUTE_APP, host: cfg.OMNIROUTE_HOSTNAME || `${cfg.OMNIROUTE_HOST_PREFIX}.${cfg.DOKKU_HOSTNAME}`, port: Number(cfg.OMNIROUTE_PORT), memory: Number(cfg.OMNIROUTE_MEMORY || 1024), image: 'ferry-ci/omiroute:cached', health: '/api/monitoring/health' },
 ];
 
 const headers = { 'X-Auth-Email': cfg.CF_EMAIL, 'X-Auth-Key': cfg.CF_GLOBAL_APIKEY, 'Content-Type': 'application/json' };
@@ -58,26 +60,27 @@ async function resolveZone(hostname, accountId) {
   }
   fail(`No Cloudflare zone for ${hostname}`);
 }
+function dokku(args, options = {}) { return run('docker', ['exec', 'dokku', 'dokku', ...args], options); }
+function dokkuOutput(args) { return output('docker', ['exec', 'dokku', 'dokku', ...args]); }
 async function waitApp(app) {
   const url = `https://${app.host}${app.health}`;
-  let lastStatus = 'no response';
+  let last = 'no response';
   for (let attempt = 1; attempt <= 120; attempt += 1) {
     try {
       const response = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(10000) });
       const body = await response.text();
-      lastStatus = `HTTP ${response.status}`;
-      const acceptableStatus = response.status >= 200 && response.status < 400;
-      const acceptableBody = !app.marker || body.includes(app.marker);
-      if (acceptableStatus && acceptableBody) return;
-      if (acceptableStatus && !acceptableBody) lastStatus += ' wrong app response';
-    } catch (error) { lastStatus = error.name; }
-    if (attempt % 12 === 0) log(`Still waiting for ${url}: ${lastStatus}`);
+      last = `HTTP ${response.status}`;
+      if (response.status >= 200 && response.status < 400 && (!app.marker || body.includes(app.marker))) return;
+      if (response.status < 400) last += ' wrong app response';
+    } catch (error) { last = error.name; }
+    if (attempt % 12 === 0) log(`Waiting for ${url}: ${last}`);
     await sleep(5000);
   }
-  fail(`${url} failed public health check: ${lastStatus}`);
+  fail(`${url} failed: ${last}`);
 }
 
 async function main() {
+  mkdirSync(stateDir, { recursive: true });
   log('Resolving Cloudflare account and tunnel');
   const accounts = cfg.CF_ACCOUNT_ID ? [{ id: cfg.CF_ACCOUNT_ID }] : await cf('GET', '/accounts?per_page=50');
   const accountId = accounts[0]?.id || fail('No Cloudflare account found');
@@ -86,6 +89,7 @@ async function main() {
   if (!tunnel) tunnel = await cf('POST', `/accounts/${accountId}/cfd_tunnel`, { name: cfg.TUNNEL_NAME, tunnel_secret: output('openssl', ['rand', '-base64', '32']), config_src: 'cloudflare' });
   const tunnelToken = await cf('GET', `/accounts/${accountId}/cfd_tunnel/${tunnel.id}/token`);
 
+  log('Reconciling DNS records in parallel');
   await Promise.all(apps.map(async (app) => {
     const zoneId = await resolveZone(app.host, accountId);
     const records = await cf('GET', `/zones/${zoneId}/dns_records?type=CNAME&name=${encodeURIComponent(app.host)}&per_page=1`);
@@ -94,51 +98,44 @@ async function main() {
     else await cf('POST', `/zones/${zoneId}/dns_records`, payload);
   }));
 
-  log('Preparing Ferry runtime');
-  rmSync(runtime, { recursive: true, force: true });
-  run('git', ['clone', '--depth', '1', cfg.FERRY_REPOSITORY, runtime]);
-  const ferryPath = join(runtime, 'ferry.sh');
-  const source = readFileSync(ferryPath, 'utf8');
-  const needle = '-H "Authorization: Bearer ${CF_API_TOKEN}"';
-  if (!source.includes(needle)) fail('Unsupported Ferry Cloudflare authentication helper');
-  writeFileSync(ferryPath, source.replace(needle, '-H "X-Auth-Email: ${CF_EMAIL}"\n        -H "X-Auth-Key: ${CF_GLOBAL_APIKEY}"'));
-  chmodSync(ferryPath, 0o755);
-  writeFileSync(join(runtime, '.env'), `TUNNEL_ID=${tunnel.id}\nTUNNEL_TOKEN=${tunnelToken}\nDOKKU_HOSTNAME=${cfg.DOKKU_HOSTNAME}\nCF_ACCOUNT_ID=${accountId}\nCF_API_TOKEN=global-key-compat\nCF_EMAIL=${cfg.CF_EMAIL}\nCF_GLOBAL_APIKEY=${cfg.CF_GLOBAL_APIKEY}\n`);
-
+  writeFileSync(envFile, `TUNNEL_TOKEN=${tunnelToken}\nDOKKU_HOSTNAME=${cfg.DOKKU_HOSTNAME}\n`, { mode: 0o600 });
   try { output('docker', ['network', 'inspect', 'webserver']); } catch { run('docker', ['network', 'create', 'webserver']); }
   try { output('docker', ['volume', 'inspect', 'dokku-data']); } catch { run('docker', ['volume', 'create', 'dokku-data']); }
-  run('docker', ['compose', '-f', join(runtime, 'docker-compose.yml'), 'up', '-d']);
-  let dokkuReady = false;
+  run('docker', ['compose', '--env-file', envFile, '-f', composeFile, 'up', '-d']);
+
+  let ready = false;
   for (let attempt = 0; attempt < 90; attempt += 1) {
-    try { output('docker', ['exec', 'dokku', 'dokku', 'version']); dokkuReady = true; break; }
-    catch { await sleep(2000); }
+    try { dokkuOutput(['version']); ready = true; break; } catch { await sleep(2000); }
   }
-  if (!dokkuReady) fail('Dokku failed to start');
-  try { run('docker', ['exec', 'dokku', 'dokku', 'network:set', '--global', 'attach-post-deploy', 'webserver']); } catch {}
-  await cf('PUT', `/accounts/${accountId}/cfd_tunnel/${tunnel.id}/configurations`, { config: { ingress: [{ service: 'http_status:404' }] } });
+  if (!ready) fail('Dokku failed to start');
+  try { dokku(['network:set', '--global', 'attach-post-deploy', 'webserver']); } catch {}
 
-  const ferryEnv = { ...process.env, CF_ACCOUNT_ID: accountId, TUNNEL_ID: tunnel.id, TUNNEL_TOKEN: tunnelToken, CF_API_TOKEN: 'global-key-compat' };
-  log('Creating all app infrastructure with Ferry');
+  log('Configuring Dokku apps directly');
+  const currentApps = new Set(dokkuOutput(['apps:list']).split(/\r?\n/).map((line) => line.trim()).filter((line) => /^[a-z0-9][a-z0-9-]*$/i.test(line)));
   for (const app of apps) {
-    run(ferryPath, ['deploy', app.name, '-H', app.host, '-p', String(app.port), '-m', String(app.memory), '-d', runtime, '--no-push', '-y'], { cwd: runtime, env: ferryEnv });
-    try { run('docker', ['exec', 'dokku', 'dokku', 'network:set', app.name, 'attach-post-deploy', 'webserver']); } catch {}
+    log(`Configuring ${app.name}`);
+    if (!currentApps.has(app.name)) dokku(['apps:create', app.name]);
+    dokku(['domains:set', app.name, app.host]);
+    dokku(['ports:set', app.name, `http:80:${app.port}`]);
+    dokku(['resource:limit', '--memory', String(app.memory), app.name]);
+    dokku(['network:set', app.name, 'attach-post-deploy', 'webserver']);
   }
-
-  run('docker', ['exec', 'dokku', 'dokku', 'config:set', '--no-restart', cfg.OMNIROUTE_APP,
+  dokku(['config:set', '--no-restart', cfg.OMNIROUTE_APP,
     `INITIAL_PASSWORD=${cfg.INITIAL_PASSWORD}`, 'HOSTNAME=0.0.0.0', `PORT=${cfg.OMNIROUTE_PORT}`,
     'OMNIROUTE_MEMORY_MB=768', 'NODE_OPTIONS=--max-old-space-size=768']);
 
-  log('Releasing application images sequentially to avoid Dokku nginx races');
+  log('Releasing cached images sequentially');
   for (const app of apps) {
     log(`Releasing ${app.name}`);
-    run('docker', ['exec', 'dokku', 'dokku', 'git:from-image', app.name, app.image]);
+    dokku(['git:from-image', app.name, app.image]);
   }
 
+  log('Publishing one combined Cloudflare ingress configuration');
   const ingress = apps.map((app) => ({ hostname: app.host, service: 'http://dokku:80' }));
   ingress.push({ service: 'http_status:404' });
   await cf('PUT', `/accounts/${accountId}/cfd_tunnel/${tunnel.id}/configurations`, { config: { ingress } });
-  run('docker', ['compose', '-f', join(runtime, 'docker-compose.yml'), 'restart', 'cloudflared']);
-  await Promise.all(apps.map((app) => waitApp(app)));
+  run('docker', ['compose', '--env-file', envFile, '-f', composeFile, 'restart', 'cloudflared']);
+  await Promise.all(apps.map(waitApp));
 
   log('All apps are publicly reachable');
   if (process.env.GITHUB_STEP_SUMMARY) writeFileSync(process.env.GITHUB_STEP_SUMMARY, apps.map((app) => `- https://${app.host}`).join('\n') + '\n', { flag: 'a' });
@@ -152,6 +149,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error(`\n[ferry] ${error.stack || error.message}`);
+  console.error(`\n[deploy] ${error.stack || error.message}`);
   process.exit(1);
 });

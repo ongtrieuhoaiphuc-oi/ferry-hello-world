@@ -27,17 +27,16 @@ Cloning into '/home/runner/work/_temp/ferry-runtime'...
  Container cloudflared  Started
 
 [1;36m[ferry-action][0m Waiting for Dokku
-SHA256:smPpU0cv5r3EZGzqN/gnz67xi7qfHMRwUkJDB+VB6/M
+SHA256:aHMq2foXBcxdZipTIg1ftSHmgz6EQ0+dVtChEEyAbmA
 =====> Setting attach-post-deploy to webserver
+
+[1;36m[ferry-action][0m Initializing Cloudflare ingress before Ferry preflight
 
 [1;36m[ferry-action][0m Deploying the checked-out app through Ferry
   ferry v0.11.0
-  2026-07-11 11:55 +0000
+  2026-07-11 11:58 +0000
 
   Deploy Application ─────────────────────
 
-Traceback (most recent call last):
-  File "<string>", line 7, in <module>
-AttributeError: 'NoneType' object has no attribute 'get'
-  ✗ Failed to verify existing ingress before deploy.
+  ✗ Hostname 'hello.dockflarestacktemplate.dpdns.org' already has an ingress rule.
 ```

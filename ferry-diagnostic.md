@@ -28,6 +28,6 @@ Cloning into '/home/runner/work/_temp/ferry-runtime'...
  Container cloudflared  Started
 
 [1;36m[ferry-action][0m Waiting for Dokku
-SHA256:ntKaEXfZkS8UsTePwgLjj4NgfjJfFydbSpvLSKDVpNg
+SHA256:HGS/qWAomd0Stcdya3suas4SVfIp24dPCXSd0c+SqII
 =====> Setting attach-post-deploy to webserver
 ```

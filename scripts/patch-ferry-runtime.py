@@ -24,8 +24,8 @@ if old_ssh not in source:
 source = source.replace(old_ssh, new_ssh)
 
 marker = 'log "Deploying the checked-out app through Ferry"\n'
-initial_ingress = '''log "Initializing Cloudflare ingress before Ferry preflight"
-ingress_payload="$(jq -nc --arg host "$APP_HOSTNAME" '{config:{ingress:[{hostname:$host,service:"http://dokku:80"},{service:"http_status:404"}]}}')"
+initial_ingress = '''log "Initializing empty Cloudflare ingress before Ferry preflight"
+ingress_payload='{"config":{"ingress":[{"service":"http_status:404"}]}}'
 cf_result "$(cf PUT "/accounts/$CF_ACCOUNT_ID/cfd_tunnel/$TUNNEL_ID/configurations" "$ingress_payload")" >/dev/null
 
 log "Deploying the checked-out app through Ferry"

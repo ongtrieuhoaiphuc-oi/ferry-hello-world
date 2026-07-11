@@ -54,6 +54,14 @@ jobs:
         with:
           path: /tmp/ferry-image-cache
           key: ferry-runtime-${{ runner.os }}-amd64-dokku-0.37.7-v2
+      - name: Prepare hello2 source repository
+        shell: bash
+        run: |
+          git -C apps/hello2 init -b main
+          git -C apps/hello2 config user.name github-actions
+          git -C apps/hello2 config user.email github-actions@users.noreply.github.com
+          git -C apps/hello2 add --all
+          git -C apps/hello2 commit -m "Build hello2"
       - name: Deploy hello and hello2 through Ferry
         id: deploy
         continue-on-error: true

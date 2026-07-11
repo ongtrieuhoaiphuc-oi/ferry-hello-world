@@ -59,19 +59,28 @@ jobs:
           path: /tmp/ferry-image-cache
           key: ferry-images-${{ runner.os }}-amd64-dokku-0.37.7-v1
 
-      - name: Apply Dokku compatibility fix
+      - name: Apply GitHub runner compatibility fixes
         shell: bash
         run: |
           python3 - <<'PY'
           from pathlib import Path
           path = Path('scripts/ferry-cloudflare-action.sh')
           source = path.read_text()
-          old = 'docker exec dokku dokku network:set --global attach-post-deploy webserver\n'
-          new = '''docker exec dokku dokku network:set --global attach-post-deploy webserver || log "Dokku returned a non-zero status after setting attach-post-deploy; continuing"
-          '''
-          if old not in source:
-              raise SystemExit('Dokku setup line not found')
-          path.write_text(source.replace(old, new))
+          replacements = {
+            'docker exec dokku dokku network:set --global attach-post-deploy webserver\n': 'docker exec dokku dokku network:set --global attach-post-deploy webserver || log "Dokku network setting returned non-zero; continuing"\n',
+            'ssh-keyscan -p 3022 localhost >> "$HOME/.ssh/known_hosts" 2>/dev/null\n': '''ssh_ready=false
+for _ in $(seq 1 60); do
+  if ssh-keyscan -p 3022 localhost >> "$HOME/.ssh/known_hosts" 2>/dev/null; then ssh_ready=true; break; fi
+  sleep 2
+done
+$ssh_ready || die "Dokku SSH did not become ready"
+'''
+          }
+          for old, new in replacements.items():
+              if old not in source:
+                  raise SystemExit(f'Compatibility target not found: {old[:40]}')
+              source = source.replace(old, new)
+          path.write_text(source)
           PY
 
       - name: Deploy with Ferry through Cloudflare
@@ -88,7 +97,7 @@ jobs:
             echo '# Ferry failure diagnostics'
             echo
             echo '```text'
-            tail -n 100 /tmp/ferry-deploy.log | sed -E 's/(X-Auth-Key:|Authorization: Bearer|TUNNEL_TOKEN=).*/\1 [REDACTED]/Ig'
+            tail -n 120 /tmp/ferry-deploy.log | sed -E 's/(X-Auth-Key:|Authorization: Bearer|TUNNEL_TOKEN=).*/\1 [REDACTED]/Ig'
             echo '```'
           } > ferry-diagnostic.md
           git config user.name github-actions

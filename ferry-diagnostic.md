@@ -27,16 +27,8 @@ Cloning into '/home/runner/work/_temp/ferry-runtime'...
  Container cloudflared  Started
 
 [1;36m[ferry-action][0m Waiting for Dokku
-SHA256:aHMq2foXBcxdZipTIg1ftSHmgz6EQ0+dVtChEEyAbmA
+SHA256:d+z6+wsQKbDapF1szgyYfy9aOCX1tAKnjkTdlKkdB7I
 =====> Setting attach-post-deploy to webserver
 
-[1;36m[ferry-action][0m Initializing Cloudflare ingress before Ferry preflight
-
-[1;36m[ferry-action][0m Deploying the checked-out app through Ferry
-  ferry v0.11.0
-  2026-07-11 11:58 +0000
-
-  Deploy Application ─────────────────────
-
-  ✗ Hostname 'hello.dockflarestacktemplate.dpdns.org' already has an ingress rule.
+[1;31m[ferry-action][0m Dokku SSH did not become ready
 ```

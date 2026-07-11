@@ -46,8 +46,10 @@ jobs:
           path: /tmp/ferry-app-cache
           key: ferry-apps-${{ runner.os }}-${{ hashFiles('Dockerfile', 'package.json', 'server.js', 'apps/**/Dockerfile', 'apps/**/package.json', 'apps/**/server.js') }}
 
-      - name: Load runtime and build apps in parallel
-        run: node --check scripts/load-runtime-images.mjs && node scripts/load-runtime-images.mjs
+      - name: Load runtime and application images
+        run: |
+          node --check scripts/load-runtime-images.mjs
+          node scripts/load-runtime-images.mjs
 
       - name: Save Ferry runtime images
         if: steps.runtime-cache.outputs.cache-hit != 'true'
@@ -63,8 +65,7 @@ jobs:
           path: /tmp/ferry-app-cache
           key: ferry-apps-${{ runner.os }}-${{ hashFiles('Dockerfile', 'package.json', 'server.js', 'apps/**/Dockerfile', 'apps/**/package.json', 'apps/**/server.js') }}
 
-      - name: Validate deployment module
-        run: node --check scripts/deploy-ferry.mjs
-
-      - name: Deploy all apps in parallel
-        run: node scripts/deploy-ferry.mjs
+      - name: Deploy and verify all apps
+        run: |
+          node --check scripts/deploy-ferry.mjs
+          node scripts/deploy-ferry.mjs

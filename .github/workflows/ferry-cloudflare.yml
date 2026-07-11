@@ -1,6 +1,8 @@
 name: Ferry Cloudflare Demo
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       keep_alive_minutes:

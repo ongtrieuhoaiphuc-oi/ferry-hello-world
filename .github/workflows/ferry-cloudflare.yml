@@ -33,29 +33,22 @@ jobs:
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
-
       - name: Initialize structured logs
-        id: init_logs
-        shell: bash
         run: |
-          set -o pipefail
           mkdir -p "$FERRY_LOG_DIR/steps" "$FERRY_LOG_DIR/apps/hello" "$FERRY_LOG_DIR/apps/hello2" "$FERRY_LOG_DIR/apps/omiroute" "$FERRY_LOG_DIR/system"
           node scripts/workflow-log.mjs event start "workflow initialized" | tee "$FERRY_LOG_DIR/steps/00-initialize.log"
-
       - name: Restore Ferry runtime images
         id: runtime_cache
         uses: actions/cache/restore@v5
         with:
           path: /tmp/ferry-runtime-cache
           key: ferry-runtime-${{ runner.os }}-amd64-dokku-0.37.7-v3
-
       - name: Restore application images
         id: app_cache
         uses: actions/cache/restore@v5
         with:
           path: /tmp/ferry-app-cache
           key: ferry-apps-${{ runner.os }}-${{ hashFiles('Dockerfile', 'package.json', 'server.js', 'apps/**/Dockerfile', 'apps/**/package.json', 'apps/**/server.js') }}
-
       - name: Load runtime and application images
         id: load_images
         shell: bash
@@ -63,33 +56,25 @@ jobs:
           set -o pipefail
           node --check scripts/load-runtime-images.mjs 2>&1 | tee "$FERRY_LOG_DIR/steps/10-syntax-load-images.log"
           node scripts/load-runtime-images.mjs 2>&1 | tee "$FERRY_LOG_DIR/steps/11-load-images.log"
-
-      - name: Save Ferry runtime images
-        id: save_runtime_cache
-        if: steps.runtime_cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v5
-        with:
-          path: /tmp/ferry-runtime-cache
-          key: ferry-runtime-${{ runner.os }}-amd64-dokku-0.37.7-v3
-
-      - name: Save application images
-        id: save_app_cache
-        if: steps.app_cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v5
-        with:
-          path: /tmp/ferry-app-cache
-          key: ferry-apps-${{ runner.os }}-${{ hashFiles('Dockerfile', 'package.json', 'server.js', 'apps/**/Dockerfile', 'apps/**/package.json', 'apps/**/server.js') }}
-
+      - name: Preserve hostname routing and validate deployment module
+        run: |
+          node --input-type=module - <<'NODE'
+          import { readFileSync, writeFileSync } from 'node:fs';
+          const path = 'scripts/deploy-ferry.mjs';
+          let source = readFileSync(path, 'utf8');
+          const before = "const ingress = apps.map((app) => ({ hostname: app.host, service: 'http://dokku:80' }));";
+          const after = "const ingress = apps.map((app) => ({ hostname: app.host, service: 'http://dokku:80', originRequest: { httpHostHeader: app.host } }));";
+          if (!source.includes(before)) throw new Error('Cloudflare ingress marker missing');
+          writeFileSync(path, source.replace(before, after));
+          NODE
+          node --check scripts/deploy-ferry.mjs
       - name: Deploy and verify all apps
         id: deploy
         shell: bash
         run: |
           set -o pipefail
-          node --check scripts/deploy-ferry.mjs 2>&1 | tee "$FERRY_LOG_DIR/steps/20-syntax-deploy.log"
           node scripts/deploy-ferry.mjs 2>&1 | tee "$FERRY_LOG_DIR/steps/21-deploy.log"
-
       - name: Collect per-app and system diagnostics
-        id: diagnostics
         if: always()
         continue-on-error: true
         shell: bash
@@ -100,10 +85,7 @@ jobs:
           DEPLOY_OUTCOME: ${{ steps.deploy.outcome }}
           RUNTIME_CACHE_HIT: ${{ steps.runtime_cache.outputs.cache-hit }}
           APP_CACHE_HIT: ${{ steps.app_cache.outputs.cache-hit }}
-        run: |
-          set -o pipefail
-          node scripts/collect-diagnostics.mjs 2>&1 | tee "$FERRY_LOG_DIR/steps/90-diagnostics.log"
-
+        run: node scripts/collect-diagnostics.mjs 2>&1 | tee "$FERRY_LOG_DIR/steps/90-diagnostics.log"
       - name: Upload complete workflow logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -113,11 +95,8 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           compression-level: 6
-
       - name: Publish artifact summary
         if: always()
-        shell: bash
         run: |
           echo "### Workflow evidence" >> "$GITHUB_STEP_SUMMARY"
           echo "Artifact: \`ferry-workflow-logs-${{ github.run_number }}-${{ github.run_attempt }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "Contains step logs, app logs, Dokku reports, Docker state, Cloudflare connector logs, and result metadata." >> "$GITHUB_STEP_SUMMARY"

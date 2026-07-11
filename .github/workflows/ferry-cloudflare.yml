@@ -1,4 +1,4 @@
-name: Ferry Cloudflare Demo
+name: OmniRoute Cloudflare Demo
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       keep_alive_minutes:
-        description: Keep the ephemeral Ferry host online (1-350 minutes)
+        description: Keep OmniRoute online (1-350 minutes)
         required: false
         default: "350"
 
@@ -14,7 +14,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ferry-${{ github.repository }}
+  group: omniroute-${{ github.repository }}
   cancel-in-progress: true
 
 jobs:
@@ -25,35 +25,31 @@ jobs:
       FERRY_ENV_RAW: ${{ secrets.FERRY_ENV }}
       KEEP_ALIVE_MINUTES: ${{ inputs.keep_alive_minutes || '350' }}
       FERRY_RUNTIME_CACHE: /tmp/ferry-runtime-cache
-      FERRY_APP_CACHE: /tmp/ferry-app-cache
+      FERRY_APP_CACHE: /tmp/omniroute-app-cache
       FERRY_LOG_DIR: ${{ github.workspace }}/workflow-logs
     steps:
       - name: Checkout
         uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
 
-      - name: Initialize structured logs
-        run: |
-          mkdir -p "$FERRY_LOG_DIR/steps" "$FERRY_LOG_DIR/apps/hello" "$FERRY_LOG_DIR/apps/hello2" "$FERRY_LOG_DIR/apps/omiroute" "$FERRY_LOG_DIR/system"
-          echo '{"event":"start","ts":"'$(date -Is)'"}' > "$FERRY_LOG_DIR/events.jsonl"
+      - name: Initialize logs
+        run: mkdir -p "$FERRY_LOG_DIR/steps" "$FERRY_LOG_DIR/apps/omiroute" "$FERRY_LOG_DIR/system"
 
       - name: Restore runtime images
         id: runtime-cache
         uses: actions/cache/restore@v5
         with:
           path: /tmp/ferry-runtime-cache
-          key: ferry-runtime-${{ runner.os }}-amd64-dokku-0.37.7-v3
+          key: omniroute-runtime-${{ runner.os }}-dokku-0.37.7-v1
 
-      - name: Restore application images
+      - name: Restore OmniRoute image
         id: app-cache
         uses: actions/cache/restore@v5
         with:
-          path: /tmp/ferry-app-cache
-          key: ferry-apps-${{ runner.os }}-${{ hashFiles('Dockerfile', 'package.json', 'server.js', 'apps/**/Dockerfile', 'apps/**/package.json', 'apps/**/server.js') }}
+          path: /tmp/omniroute-app-cache
+          key: omniroute-image-${{ runner.os }}-${{ hashFiles('apps/omiroute/**') }}
 
-      - name: Load runtime and application images
-        id: load_images
+      - name: Load images
+        id: load
         run: |
           node --check scripts/load-runtime-images.mjs
           node scripts/load-runtime-images.mjs 2>&1 | tee "$FERRY_LOG_DIR/steps/10-load-images.log"
@@ -63,16 +59,16 @@ jobs:
         uses: actions/cache/save@v5
         with:
           path: /tmp/ferry-runtime-cache
-          key: ferry-runtime-${{ runner.os }}-amd64-dokku-0.37.7-v3
+          key: omniroute-runtime-${{ runner.os }}-dokku-0.37.7-v1
 
-      - name: Save application images
+      - name: Save OmniRoute image
         if: steps.app-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v5
         with:
-          path: /tmp/ferry-app-cache
-          key: ferry-apps-${{ runner.os }}-${{ hashFiles('Dockerfile', 'package.json', 'server.js', 'apps/**/Dockerfile', 'apps/**/package.json', 'apps/**/server.js') }}
+          path: /tmp/omniroute-app-cache
+          key: omniroute-image-${{ runner.os }}-${{ hashFiles('apps/omiroute/**') }}
 
-      - name: Deploy and verify all apps
+      - name: Deploy OmniRoute
         id: deploy
         run: |
           node --check scripts/deploy-ferry.mjs
@@ -88,11 +84,11 @@ jobs:
           APP_CACHE_HIT: ${{ steps.app-cache.outputs.cache-hit }}
         run: node scripts/collect-diagnostics.mjs 2>&1 | tee "$FERRY_LOG_DIR/steps/90-diagnostics.log"
 
-      - name: Upload workflow logs
+      - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ferry-workflow-logs-${{ github.run_number }}-${{ github.run_attempt }}
+          name: omniroute-workflow-logs-${{ github.run_number }}-${{ github.run_attempt }}
           path: workflow-logs/
           if-no-files-found: warn
           retention-days: 14

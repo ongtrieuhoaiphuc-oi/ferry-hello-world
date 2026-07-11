@@ -1,5 +1,4 @@
 # Ferry failure diagnostics
-
 ```text
 
 [1;36m[ferry-action][0m Resolving Cloudflare account
@@ -28,6 +27,17 @@ Cloning into '/home/runner/work/_temp/ferry-runtime'...
  Container cloudflared  Started
 
 [1;36m[ferry-action][0m Waiting for Dokku
-SHA256:HGS/qWAomd0Stcdya3suas4SVfIp24dPCXSd0c+SqII
+SHA256:smPpU0cv5r3EZGzqN/gnz67xi7qfHMRwUkJDB+VB6/M
 =====> Setting attach-post-deploy to webserver
+
+[1;36m[ferry-action][0m Deploying the checked-out app through Ferry
+  ferry v0.11.0
+  2026-07-11 11:55 +0000
+
+  Deploy Application ─────────────────────
+
+Traceback (most recent call last):
+  File "<string>", line 7, in <module>
+AttributeError: 'NoneType' object has no attribute 'get'
+  ✗ Failed to verify existing ingress before deploy.
 ```

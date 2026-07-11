@@ -22,11 +22,40 @@ jobs:
     env:
       FERRY_ENV_RAW: ${{ secrets.FERRY_ENV }}
       KEEP_ALIVE_MINUTES: ${{ inputs.keep_alive_minutes || '350' }}
+      FERRY_IMAGE_CACHE: ${{ runner.temp }}/ferry-image-cache
     steps:
       - name: Checkout app
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Restore Ferry Docker image cache
+        id: ferry-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.FERRY_IMAGE_CACHE }}
+          key: ferry-images-${{ runner.os }}-amd64-dokku-0.37.7-v1
+
+      - name: Load or warm Ferry Docker images
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$FERRY_IMAGE_CACHE"
+          archive="$FERRY_IMAGE_CACHE/images.tar.zst"
+
+          if [[ -s "$archive" ]]; then
+            echo "Loading Ferry images from the GitHub Actions cache"
+            zstd -dc "$archive" | docker load
+          else
+            echo "Cache miss, pulling Ferry images"
+            docker pull dokku/dokku:0.37.7
+            docker pull cloudflare/cloudflared:latest
+            docker save dokku/dokku:0.37.7 cloudflare/cloudflared:latest \
+              | zstd -T0 -3 -o "$archive"
+          fi
+
+          docker image inspect dokku/dokku:0.37.7 >/dev/null
+          docker image inspect cloudflare/cloudflared:latest >/dev/null
 
       - name: Apply Dokku compatibility fix
         shell: bash

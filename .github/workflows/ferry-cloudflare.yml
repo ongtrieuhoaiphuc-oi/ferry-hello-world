@@ -11,7 +11,7 @@ on:
         default: "350"
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: ferry-${{ github.repository }}
@@ -45,15 +45,12 @@ jobs:
           mkdir -p "$FERRY_IMAGE_CACHE"
           archive="$FERRY_IMAGE_CACHE/images.tar.zst"
           if [[ -s "$archive" ]]; then
-            echo "Loading Ferry images from cache"
             zstd -dc "$archive" | docker load
           else
             docker pull dokku/dokku:0.37.7
             docker pull cloudflare/cloudflared:latest
             docker save dokku/dokku:0.37.7 cloudflare/cloudflared:latest | zstd -T0 -3 -o "$archive"
           fi
-          docker image inspect dokku/dokku:0.37.7 >/dev/null
-          docker image inspect cloudflare/cloudflared:latest >/dev/null
 
       - name: Save Ferry Docker image cache
         if: steps.ferry-cache.outputs.cache-hit != 'true'
@@ -81,18 +78,30 @@ jobs:
           PY
 
       - name: Deploy with Ferry through Cloudflare
+        id: ferry-deploy
+        continue-on-error: true
+        shell: bash
+        run: bash scripts/ferry-cloudflare-action.sh 2>&1 | tee /tmp/ferry-deploy.log
+
+      - name: Publish sanitized failure diagnostics
+        if: steps.ferry-deploy.outcome == 'failure'
         shell: bash
         run: |
-          set +e
-          bash scripts/ferry-cloudflare-action.sh 2>&1 | tee /tmp/ferry-deploy.log
-          status=${PIPESTATUS[0]}
-          if (( status != 0 )); then
-            {
-              echo '### Ferry deploy diagnostics'
-              echo '```text'
-              tail -n 80 /tmp/ferry-deploy.log \
-                | sed -E 's/(X-Auth-Key:|Authorization: Bearer|TUNNEL_TOKEN=).*/\1 [REDACTED]/Ig'
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
-          fi
-          exit "$status"
+          {
+            echo '# Ferry failure diagnostics'
+            echo
+            echo '```text'
+            tail -n 100 /tmp/ferry-deploy.log \
+              | sed -E 's/(X-Auth-Key:|Authorization: Bearer|TUNNEL_TOKEN=).*/\1 [REDACTED]/Ig'
+            echo '```'
+          } > ferry-diagnostic.md
+          git config user.name github-actions
+          git config user.email github-actions@users.noreply.github.com
+          git add ferry-diagnostic.md
+          git commit -m 'Record Ferry diagnostics [skip ci]'
+          git push origin HEAD:main
+          exit 1
+
+      - name: Confirm public deployment
+        if: steps.ferry-deploy.outcome == 'success'
+        run: rm -f ferry-diagnostic.md

@@ -45,9 +45,9 @@ console.log(`::add-mask::${process.env.INITIAL_PASSWORD}`);
 
 const cfg = process.env;
 const apps = [
-  { name: cfg.HELLO1_APP, host: cfg.HELLO1_HOSTNAME || `${cfg.HELLO1_HOST_PREFIX}.${cfg.DOKKU_HOSTNAME}`, port: Number(cfg.HELLO1_PORT), image: 'ferry-ci/ferry-hello-world:cached', health: '/health' },
-  { name: cfg.HELLO2_APP, host: cfg.HELLO2_HOSTNAME || `${cfg.HELLO2_HOST_PREFIX}.${cfg.DOKKU_HOSTNAME}`, port: Number(cfg.HELLO2_PORT), image: 'ferry-ci/hello2:cached', health: '/health' },
-  { name: cfg.OMNIROUTE_APP, host: cfg.OMNIROUTE_HOSTNAME || `${cfg.OMNIROUTE_HOST_PREFIX}.${cfg.DOKKU_HOSTNAME}`, port: Number(cfg.OMNIROUTE_PORT), image: 'ferry-ci/omiroute:cached', health: '/api/monitoring/health' },
+  { name: cfg.HELLO1_APP, host: cfg.HELLO1_HOSTNAME || `${cfg.HELLO1_HOST_PREFIX}.${cfg.DOKKU_HOSTNAME}`, port: Number(cfg.HELLO1_PORT), memory: Number(cfg.HELLO1_MEMORY || 256), image: 'ferry-ci/ferry-hello-world:cached', health: '/health' },
+  { name: cfg.HELLO2_APP, host: cfg.HELLO2_HOSTNAME || `${cfg.HELLO2_HOST_PREFIX}.${cfg.DOKKU_HOSTNAME}`, port: Number(cfg.HELLO2_PORT), memory: Number(cfg.HELLO2_MEMORY || 256), image: 'ferry-ci/hello2:cached', health: '/health' },
+  { name: cfg.OMNIROUTE_APP, host: cfg.OMNIROUTE_HOSTNAME || `${cfg.OMNIROUTE_HOST_PREFIX}.${cfg.DOKKU_HOSTNAME}`, port: Number(cfg.OMNIROUTE_PORT), memory: Number(cfg.OMNIROUTE_MEMORY || 1024), image: 'ferry-ci/omiroute:cached', health: '/' },
 ];
 
 const headers = { 'X-Auth-Email': cfg.CF_EMAIL, 'X-Auth-Key': cfg.CF_GLOBAL_APIKEY, 'Content-Type': 'application/json' };
@@ -67,14 +67,17 @@ async function resolveZone(hostname, accountId) {
   fail(`No Cloudflare zone for ${hostname}`);
 }
 async function waitHttp(url) {
-  for (let attempt = 0; attempt < 120; attempt += 1) {
+  let lastStatus = 'no response';
+  for (let attempt = 1; attempt <= 120; attempt += 1) {
     try {
-      const response = await fetch(url, { signal: AbortSignal.timeout(10000) });
-      if (response.ok) return;
-    } catch {}
+      const response = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(10000) });
+      lastStatus = `HTTP ${response.status}`;
+      if (response.status >= 200 && response.status < 500) return;
+    } catch (error) { lastStatus = error.name; }
+    if (attempt % 12 === 0) log(`Still waiting for ${url}: ${lastStatus}`);
     await sleep(5000);
   }
-  fail(`${url} failed public health check`);
+  fail(`${url} failed public health check: ${lastStatus}`);
 }
 
 async function main() {
@@ -118,15 +121,17 @@ async function main() {
   await cf('PUT', `/accounts/${accountId}/cfd_tunnel/${tunnel.id}/configurations`, { config: { ingress: [{ service: 'http_status:404' }] } });
 
   const ferryEnv = { ...process.env, CF_ACCOUNT_ID: accountId, TUNNEL_ID: tunnel.id, TUNNEL_TOKEN: tunnelToken, CF_API_TOKEN: 'global-key-compat' };
-  log('Creating all app infrastructure with Ferry, no Git source required');
+  log('Creating all app infrastructure with Ferry');
   for (const app of apps) {
-    run(ferryPath, ['deploy', app.name, '-H', app.host, '-p', String(app.port), '-d', runtime, '--no-push', '-y'], { cwd: runtime, env: ferryEnv });
+    run(ferryPath, ['deploy', app.name, '-H', app.host, '-p', String(app.port), '-m', String(app.memory), '-d', runtime, '--no-push', '-y'], { cwd: runtime, env: ferryEnv });
   }
 
   for (const app of apps) {
     try { run('docker', ['exec', 'dokku', 'dokku', 'network:set', app.name, 'attach-post-deploy', 'webserver']); } catch {}
   }
-  run('docker', ['exec', 'dokku', 'dokku', 'config:set', '--no-restart', cfg.OMNIROUTE_APP, `INITIAL_PASSWORD=${cfg.INITIAL_PASSWORD}`, 'HOSTNAME=0.0.0.0', `PORT=${cfg.OMNIROUTE_PORT}`]);
+  run('docker', ['exec', 'dokku', 'dokku', 'config:set', '--no-restart', cfg.OMNIROUTE_APP,
+    `INITIAL_PASSWORD=${cfg.INITIAL_PASSWORD}`, 'HOSTNAME=0.0.0.0', `PORT=${cfg.OMNIROUTE_PORT}`,
+    'OMNIROUTE_MEMORY_MB=768', 'NODE_OPTIONS=--max-old-space-size=768']);
 
   log('Releasing all application images in parallel');
   await Promise.all(apps.map((app) => runAsync('docker', ['exec', 'dokku', 'dokku', 'git:from-image', app.name, app.image])));
@@ -138,9 +143,7 @@ async function main() {
   await Promise.all(apps.map((app) => waitHttp(`https://${app.host}${app.health}`)));
 
   log('All apps are publicly reachable');
-  if (process.env.GITHUB_STEP_SUMMARY) {
-    writeFileSync(process.env.GITHUB_STEP_SUMMARY, apps.map((app) => `- https://${app.host}`).join('\n') + '\n', { flag: 'a' });
-  }
+  if (process.env.GITHUB_STEP_SUMMARY) writeFileSync(process.env.GITHUB_STEP_SUMMARY, apps.map((app) => `- https://${app.host}`).join('\n') + '\n', { flag: 'a' });
   const minutes = Number(cfg.KEEP_ALIVE_MINUTES || 350);
   if (!Number.isInteger(minutes) || minutes < 1 || minutes > 350) fail('KEEP_ALIVE_MINUTES must be 1-350');
   const deadline = Date.now() + minutes * 60000;
@@ -150,7 +153,4 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error(`\n[ferry] ${error.stack || error.message}`);
-  process.exit(1);
-});
+main().catch((error) => { console.error(`\n[ferry] ${error.stack || error.message}`); process.exit(1); });

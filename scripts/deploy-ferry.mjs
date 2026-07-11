@@ -37,9 +37,9 @@ console.log(`::add-mask::${process.env.INITIAL_PASSWORD}`);
 
 const cfg = process.env;
 const apps = [
-  { name: cfg.HELLO1_APP, host: cfg.HELLO1_HOSTNAME || `${cfg.HELLO1_HOST_PREFIX}.${cfg.DOKKU_HOSTNAME}`, port: Number(cfg.HELLO1_PORT), memory: Number(cfg.HELLO1_MEMORY || 256), image: 'ferry-ci/ferry-hello-world:cached', health: '/health' },
-  { name: cfg.HELLO2_APP, host: cfg.HELLO2_HOSTNAME || `${cfg.HELLO2_HOST_PREFIX}.${cfg.DOKKU_HOSTNAME}`, port: Number(cfg.HELLO2_PORT), memory: Number(cfg.HELLO2_MEMORY || 256), image: 'ferry-ci/hello2:cached', health: '/health' },
-  { name: cfg.OMNIROUTE_APP, host: cfg.OMNIROUTE_HOSTNAME || `${cfg.OMNIROUTE_HOST_PREFIX}.${cfg.DOKKU_HOSTNAME}`, port: Number(cfg.OMNIROUTE_PORT), memory: Number(cfg.OMNIROUTE_MEMORY || 1024), image: 'ferry-ci/omiroute:cached', health: '/' },
+  { name: cfg.HELLO1_APP, host: cfg.HELLO1_HOSTNAME || `${cfg.HELLO1_HOST_PREFIX}.${cfg.DOKKU_HOSTNAME}`, port: Number(cfg.HELLO1_PORT), memory: Number(cfg.HELLO1_MEMORY || 256), image: 'ferry-ci/ferry-hello-world:cached', health: '/health', marker: '"status":"ok"' },
+  { name: cfg.HELLO2_APP, host: cfg.HELLO2_HOSTNAME || `${cfg.HELLO2_HOST_PREFIX}.${cfg.DOKKU_HOSTNAME}`, port: Number(cfg.HELLO2_PORT), memory: Number(cfg.HELLO2_MEMORY || 256), image: 'ferry-ci/hello2:cached', health: '/health', marker: '"app":"hello2"' },
+  { name: cfg.OMNIROUTE_APP, host: cfg.OMNIROUTE_HOSTNAME || `${cfg.OMNIROUTE_HOST_PREFIX}.${cfg.DOKKU_HOSTNAME}`, port: Number(cfg.OMNIROUTE_PORT), memory: Number(cfg.OMNIROUTE_MEMORY || 1024), image: 'ferry-ci/omiroute:cached', health: '/api/monitoring/health', marker: null },
 ];
 
 const headers = { 'X-Auth-Email': cfg.CF_EMAIL, 'X-Auth-Key': cfg.CF_GLOBAL_APIKEY, 'Content-Type': 'application/json' };
@@ -58,13 +58,18 @@ async function resolveZone(hostname, accountId) {
   }
   fail(`No Cloudflare zone for ${hostname}`);
 }
-async function waitHttp(url) {
+async function waitApp(app) {
+  const url = `https://${app.host}${app.health}`;
   let lastStatus = 'no response';
   for (let attempt = 1; attempt <= 120; attempt += 1) {
     try {
       const response = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(10000) });
+      const body = await response.text();
       lastStatus = `HTTP ${response.status}`;
-      if (response.status >= 200 && response.status < 500) return;
+      const acceptableStatus = response.status >= 200 && response.status < 400;
+      const acceptableBody = !app.marker || body.includes(app.marker);
+      if (acceptableStatus && acceptableBody) return;
+      if (acceptableStatus && !acceptableBody) lastStatus += ' wrong app response';
     } catch (error) { lastStatus = error.name; }
     if (attempt % 12 === 0) log(`Still waiting for ${url}: ${lastStatus}`);
     await sleep(5000);
@@ -133,7 +138,7 @@ async function main() {
   ingress.push({ service: 'http_status:404' });
   await cf('PUT', `/accounts/${accountId}/cfd_tunnel/${tunnel.id}/configurations`, { config: { ingress } });
   run('docker', ['compose', '-f', join(runtime, 'docker-compose.yml'), 'restart', 'cloudflared']);
-  await Promise.all(apps.map((app) => waitHttp(`https://${app.host}${app.health}`)));
+  await Promise.all(apps.map((app) => waitApp(app)));
 
   log('All apps are publicly reachable');
   if (process.env.GITHUB_STEP_SUMMARY) writeFileSync(process.env.GITHUB_STEP_SUMMARY, apps.map((app) => `- https://${app.host}`).join('\n') + '\n', { flag: 'a' });

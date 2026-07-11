@@ -1,7 +1,7 @@
-import { readFileSync, writeFileSync, rmSync, chmodSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, rmSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 
 const root = process.env.GITHUB_WORKSPACE || resolve(import.meta.dirname, '..');
@@ -10,6 +10,15 @@ const log = (message) => console.log(`\n\x1b[36m[ferry]\x1b[0m ${message}`);
 const fail = (message) => { throw new Error(message); };
 const run = (command, args, options = {}) => execFileSync(command, args, { stdio: 'inherit', ...options });
 const output = (command, args, options = {}) => execFileSync(command, args, { encoding: 'utf8', ...options }).trim();
+const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
+
+function runAsync(command, args, options = {}) {
+  return new Promise((resolvePromise, reject) => {
+    const child = spawn(command, args, { stdio: 'inherit', ...options });
+    child.on('error', reject);
+    child.on('close', (code) => code === 0 ? resolvePromise() : reject(new Error(`${command} ${args.join(' ')} exited ${code}`)));
+  });
+}
 
 function parseEnv(text) {
   const values = {};
@@ -32,13 +41,13 @@ Object.assign(process.env, parseEnv(process.env.FERRY_ENV_RAW || ''));
 delete process.env.FERRY_ENV_RAW;
 for (const key of ['CF_EMAIL', 'CF_GLOBAL_APIKEY', 'DOKKU_HOSTNAME']) if (!process.env[key]) fail(`FERRY_ENV requires ${key}`);
 process.env.INITIAL_PASSWORD ||= randomBytes(24).toString('base64url');
-console.log('::add-mask::' + process.env.INITIAL_PASSWORD);
+console.log(`::add-mask::${process.env.INITIAL_PASSWORD}`);
 
 const cfg = process.env;
 const apps = [
-  { name: cfg.HELLO1_APP, host: cfg.HELLO1_HOSTNAME || `${cfg.HELLO1_HOST_PREFIX}.${cfg.DOKKU_HOSTNAME}`, port: Number(cfg.HELLO1_PORT), context: root, health: '/health' },
-  { name: cfg.HELLO2_APP, host: cfg.HELLO2_HOSTNAME || `${cfg.HELLO2_HOST_PREFIX}.${cfg.DOKKU_HOSTNAME}`, port: Number(cfg.HELLO2_PORT), context: join(root, 'apps/hello2'), health: '/health' },
-  { name: cfg.OMNIROUTE_APP, host: cfg.OMNIROUTE_HOSTNAME || `${cfg.OMNIROUTE_HOST_PREFIX}.${cfg.DOKKU_HOSTNAME}`, port: Number(cfg.OMNIROUTE_PORT), context: join(root, 'apps/omiroute'), health: '/api/monitoring/health' },
+  { name: cfg.HELLO1_APP, host: cfg.HELLO1_HOSTNAME || `${cfg.HELLO1_HOST_PREFIX}.${cfg.DOKKU_HOSTNAME}`, port: Number(cfg.HELLO1_PORT), image: 'ferry-ci/ferry-hello-world:cached', health: '/health' },
+  { name: cfg.HELLO2_APP, host: cfg.HELLO2_HOSTNAME || `${cfg.HELLO2_HOST_PREFIX}.${cfg.DOKKU_HOSTNAME}`, port: Number(cfg.HELLO2_PORT), image: 'ferry-ci/hello2:cached', health: '/health' },
+  { name: cfg.OMNIROUTE_APP, host: cfg.OMNIROUTE_HOSTNAME || `${cfg.OMNIROUTE_HOST_PREFIX}.${cfg.DOKKU_HOSTNAME}`, port: Number(cfg.OMNIROUTE_PORT), image: 'ferry-ci/omiroute:cached', health: '/api/monitoring/health' },
 ];
 
 const headers = { 'X-Auth-Email': cfg.CF_EMAIL, 'X-Auth-Key': cfg.CF_GLOBAL_APIKEY, 'Content-Type': 'application/json' };
@@ -58,21 +67,14 @@ async function resolveZone(hostname, accountId) {
   fail(`No Cloudflare zone for ${hostname}`);
 }
 async function waitHttp(url) {
-  for (let i = 0; i < 120; i += 1) {
-    try { const response = await fetch(url, { signal: AbortSignal.timeout(10000) }); if (response.ok) return; } catch {}
-    await new Promise((done) => setTimeout(done, 5000));
+  for (let attempt = 0; attempt < 120; attempt += 1) {
+    try {
+      const response = await fetch(url, { signal: AbortSignal.timeout(10000) });
+      if (response.ok) return;
+    } catch {}
+    await sleep(5000);
   }
   fail(`${url} failed public health check`);
-}
-function prepareGitRepo(directory, name) {
-  if (!existsSync(directory)) fail(`App directory does not exist: ${directory}`);
-  if (existsSync(join(directory, '.git'))) return;
-  log(`Initializing standalone Git repository for ${name}`);
-  run('git', ['-C', directory, 'init', '-b', 'main']);
-  run('git', ['-C', directory, 'config', 'user.name', 'github-actions']);
-  run('git', ['-C', directory, 'config', 'user.email', 'github-actions@users.noreply.github.com']);
-  run('git', ['-C', directory, 'add', '--all']);
-  run('git', ['-C', directory, 'commit', '--allow-empty', '-m', `Build ${name}`]);
 }
 
 async function main() {
@@ -84,13 +86,13 @@ async function main() {
   if (!tunnel) tunnel = await cf('POST', `/accounts/${accountId}/cfd_tunnel`, { name: cfg.TUNNEL_NAME, tunnel_secret: output('openssl', ['rand', '-base64', '32']), config_src: 'cloudflare' });
   const tunnelToken = await cf('GET', `/accounts/${accountId}/cfd_tunnel/${tunnel.id}/token`);
 
-  for (const app of apps) {
+  await Promise.all(apps.map(async (app) => {
     const zoneId = await resolveZone(app.host, accountId);
     const records = await cf('GET', `/zones/${zoneId}/dns_records?type=CNAME&name=${encodeURIComponent(app.host)}&per_page=1`);
     const payload = { type: 'CNAME', name: app.host, content: `${tunnel.id}.cfargotunnel.com`, proxied: true, ttl: 1 };
     if (records[0]?.id) await cf('PUT', `/zones/${zoneId}/dns_records/${records[0].id}`, payload);
     else await cf('POST', `/zones/${zoneId}/dns_records`, payload);
-  }
+  }));
 
   log('Preparing Ferry runtime');
   rmSync(runtime, { recursive: true, force: true });
@@ -106,34 +108,49 @@ async function main() {
   try { output('docker', ['network', 'inspect', 'webserver']); } catch { run('docker', ['network', 'create', 'webserver']); }
   try { output('docker', ['volume', 'inspect', 'dokku-data']); } catch { run('docker', ['volume', 'create', 'dokku-data']); }
   run('docker', ['compose', '-f', join(runtime, 'docker-compose.yml'), 'up', '-d']);
-  let ready = false;
-  for (let i = 0; i < 90; i += 1) { try { output('docker', ['exec', 'dokku', 'dokku', 'version']); ready = true; break; } catch { await new Promise((done) => setTimeout(done, 2000)); } }
-  if (!ready) fail('Dokku failed to start');
+  let dokkuReady = false;
+  for (let attempt = 0; attempt < 90; attempt += 1) {
+    try { output('docker', ['exec', 'dokku', 'dokku', 'version']); dokkuReady = true; break; }
+    catch { await sleep(2000); }
+  }
+  if (!dokkuReady) fail('Dokku failed to start');
   try { run('docker', ['exec', 'dokku', 'dokku', 'network:set', '--global', 'attach-post-deploy', 'webserver']); } catch {}
   await cf('PUT', `/accounts/${accountId}/cfd_tunnel/${tunnel.id}/configurations`, { config: { ingress: [{ service: 'http_status:404' }] } });
 
   const ferryEnv = { ...process.env, CF_ACCOUNT_ID: accountId, TUNNEL_ID: tunnel.id, TUNNEL_TOKEN: tunnelToken, CF_API_TOKEN: 'global-key-compat' };
+  log('Creating all app infrastructure with Ferry, no Git source required');
   for (const app of apps) {
-    prepareGitRepo(app.context, app.name);
-    log(`Deploying ${app.name} at https://${app.host}`);
-    run(ferryPath, ['deploy', app.name, '-H', app.host, '-p', String(app.port), '-d', app.context, '--no-push', '-y'], { cwd: runtime, env: ferryEnv });
-    const tag = `ferry-ci/${app.name}:${process.env.GITHUB_SHA || 'latest'}`;
-    run('docker', ['build', '--tag', tag, app.context]);
-    try { run('docker', ['exec', 'dokku', 'dokku', 'network:set', app.name, 'attach-post-deploy', 'webserver']); } catch {}
-    if (app.name === cfg.OMNIROUTE_APP) run('docker', ['exec', 'dokku', 'dokku', 'config:set', '--no-restart', app.name, `INITIAL_PASSWORD=${cfg.INITIAL_PASSWORD}`, 'HOSTNAME=0.0.0.0', `PORT=${app.port}`]);
-    run('docker', ['exec', 'dokku', 'dokku', 'git:from-image', app.name, tag]);
+    run(ferryPath, ['deploy', app.name, '-H', app.host, '-p', String(app.port), '-d', runtime, '--no-push', '-y'], { cwd: runtime, env: ferryEnv });
   }
+
+  for (const app of apps) {
+    try { run('docker', ['exec', 'dokku', 'dokku', 'network:set', app.name, 'attach-post-deploy', 'webserver']); } catch {}
+  }
+  run('docker', ['exec', 'dokku', 'dokku', 'config:set', '--no-restart', cfg.OMNIROUTE_APP, `INITIAL_PASSWORD=${cfg.INITIAL_PASSWORD}`, 'HOSTNAME=0.0.0.0', `PORT=${cfg.OMNIROUTE_PORT}`]);
+
+  log('Releasing all application images in parallel');
+  await Promise.all(apps.map((app) => runAsync('docker', ['exec', 'dokku', 'dokku', 'git:from-image', app.name, app.image])));
 
   const ingress = apps.map((app) => ({ hostname: app.host, service: 'http://dokku:80' }));
   ingress.push({ service: 'http_status:404' });
   await cf('PUT', `/accounts/${accountId}/cfd_tunnel/${tunnel.id}/configurations`, { config: { ingress } });
   run('docker', ['compose', '-f', join(runtime, 'docker-compose.yml'), 'restart', 'cloudflared']);
-  for (const app of apps) await waitHttp(`https://${app.host}${app.health}`);
+  await Promise.all(apps.map((app) => waitHttp(`https://${app.host}${app.health}`)));
+
   log('All apps are publicly reachable');
-  if (process.env.GITHUB_STEP_SUMMARY) writeFileSync(process.env.GITHUB_STEP_SUMMARY, apps.map((app) => `- https://${app.host}`).join('\n') + '\n', { flag: 'a' });
+  if (process.env.GITHUB_STEP_SUMMARY) {
+    writeFileSync(process.env.GITHUB_STEP_SUMMARY, apps.map((app) => `- https://${app.host}`).join('\n') + '\n', { flag: 'a' });
+  }
   const minutes = Number(cfg.KEEP_ALIVE_MINUTES || 350);
   if (!Number.isInteger(minutes) || minutes < 1 || minutes > 350) fail('KEEP_ALIVE_MINUTES must be 1-350');
-  await new Promise((done) => setTimeout(done, minutes * 60000));
+  const deadline = Date.now() + minutes * 60000;
+  while (Date.now() < deadline) {
+    await sleep(30000);
+    await Promise.allSettled(apps.map((app) => fetch(`https://${app.host}${app.health}`, { signal: AbortSignal.timeout(10000) })));
+  }
 }
 
-main().catch((error) => { console.error(`\n[ferry] ${error.stack || error.message}`); process.exit(1); });
+main().catch((error) => {
+  console.error(`\n[ferry] ${error.stack || error.message}`);
+  process.exit(1);
+});

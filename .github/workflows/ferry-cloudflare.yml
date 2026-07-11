@@ -1,0 +1,33 @@
+name: Ferry Cloudflare Demo
+
+on:
+  workflow_dispatch:
+    inputs:
+      keep_alive_minutes:
+        description: Keep the ephemeral Ferry host online (1-350 minutes)
+        required: false
+        default: "350"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ferry-${{ github.repository }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      FERRY_ENV_RAW: ${{ secrets.FERRY_ENV }}
+      KEEP_ALIVE_MINUTES: ${{ inputs.keep_alive_minutes || '350' }}
+    steps:
+      - name: Checkout app
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Deploy with Ferry through Cloudflare
+        shell: bash
+        run: bash scripts/ferry-cloudflare-action.sh
